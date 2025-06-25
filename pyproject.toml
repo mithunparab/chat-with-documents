@@ -1,0 +1,25 @@
+[project]
+name = "chat-with-docs"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.0.12",
+    "fastapi>=0.115.9",
+    "groq>=0.28.0",
+    "langchain[groq]>=0.3.25",
+    "langchain-community>=0.3.25",
+    "langchain-groq>=0.3.2",
+    "pydantic>=2.11.5",
+    "python-dotenv>=1.1.0",
+    "requests>=2.32.4",
+    "streamlit>=1.45.1",
+    "unstructured[pdf]>=0.17.2",
+    "uvicorn>=0.34.3",
+    "langchain-google-genai>=2.1.5",
+    "pypdf>=5.6.0",
+    "langchain-chroma>=0.2.4",
+    "ipython>=9.3.0",
+    "langchain-openai>=0.3.24",
+]

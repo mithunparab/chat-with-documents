@@ -1,0 +1,17 @@
+python-dotenv
+langchain
+langchain-community
+langchain-groq
+pypdf
+chromadb
+groq
+streamlit
+requests
+fastapi
+uvicorn
+pydantic
+langchain[groq]
+langchain-google-genai
+langchain-chroma
+ipython
+langchain-openai
