@@ -3,10 +3,6 @@ Streamlit Frontend for Document Chat Application
 
 This module provides a Streamlit-based user interface for uploading PDF documents,
 triggering backend processing, and chatting with an assistant about the uploaded content.
-
-TODOs:
-    - TODO: Refactor synchronous file I/O to asynchronous patterns for scalability.
-    - TODO: Improve error handling and user feedback for backend failures.
 """
 
 import streamlit as st
@@ -15,7 +11,7 @@ import pandas as pd
 import json
 from typing import Dict, Any, List
 import os
-# --- Configuration ---
+
 def get_api_url() -> str:
     """
     Returns the API URL based on environment.
@@ -27,7 +23,6 @@ API_URL = get_api_url()
 
 st.set_page_config(page_title="Chat with Documents", layout="wide")
 
-# --- Authentication ---
 def login_user(username: str, password: str) -> None:
     """
     Authenticates the user and stores token in session state.
@@ -81,7 +76,6 @@ def auth_page() -> None:
             if submitted:
                 signup_user(new_username, new_password)
 
-# --- API Helpers ---
 def get_auth_headers() -> Dict[str, str]:
     """
     Returns the authorization headers for API requests.
@@ -112,7 +106,6 @@ def main_app() -> None:
     """
     st.sidebar.title(f"Welcome, {st.session_state.username}!")
 
-    # Project Selection
     projects = get_projects()
     project_names = [p['name'] for p in projects]
     st.sidebar.header("Projects")
@@ -126,7 +119,6 @@ def main_app() -> None:
 
     if selected_project_name != st.session_state.current_project_name:
         st.session_state.current_project_name = selected_project_name
-        # Reset chat when project changes
         st.session_state.messages = {}
         st.session_state.current_chat_id = None
 
@@ -144,7 +136,6 @@ def main_app() -> None:
         st.header("Create your first project to get started!")
         return
 
-    # Page selection
     page = st.sidebar.radio("Navigate", ["Chat", "Manage Documents"])
 
     if page == "Chat":
@@ -200,7 +191,6 @@ def documents_page(project_id: str) -> None:
             else:
                 st.warning("Please enter a URL.")
 
-    # Document List
     st.subheader("Uploaded Documents")
     try:
         docs_res = requests.get(f"{API_URL}/documents/{project_id}", headers=get_auth_headers())
@@ -223,12 +213,11 @@ def chat_page(project_id: str) -> None:
     st.header(f"Chat with '{st.session_state.current_project_name}'")
 
     if 'messages' not in st.session_state:
-        st.session_state.messages = {}  # Dict of {chat_id: [messages]}
+        st.session_state.messages = {} 
 
     if 'current_chat_id' not in st.session_state:
         st.session_state.current_chat_id = None
 
-    # Load chat history for the project
     try:
         history_res = requests.get(f"{API_URL}/chat/sessions/{project_id}", headers=get_auth_headers())
         if history_res.status_code == 200:
@@ -253,7 +242,6 @@ def chat_page(project_id: str) -> None:
     except Exception:
         st.sidebar.error("Failed to load chat history.")
 
-    # Display current chat messages
     chat_key = st.session_state.current_chat_id
     if chat_key and chat_key in st.session_state.messages:
         for msg in st.session_state.messages[chat_key]:
@@ -269,19 +257,15 @@ def chat_page(project_id: str) -> None:
                         except Exception:
                             st.warning("Could not parse sources.")
 
-    # Chat input
     prompt = st.chat_input("Ask a question about your documents...")
     if prompt:
-        # Display user message
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Prepare payload
         payload = {"query": prompt}
         if st.session_state.current_chat_id:
             payload["chat_id"] = st.session_state.current_chat_id
 
-        # Call API
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             full_response = ""
@@ -297,13 +281,10 @@ def chat_page(project_id: str) -> None:
                 full_response = data.get("answer", "No answer found.")
                 message_placeholder.markdown(full_response)
 
-                # Update session state with new chat ID if it's a new chat
                 if not st.session_state.current_chat_id:
                     st.session_state.current_chat_id = data['chat_id']
                     st.session_state.messages[data['chat_id']] = []
-                    st.rerun()  # Rerun to show history list
 
-                # Display sources
                 if data.get("sources"):
                     with st.expander("Sources"):
                         for source in data["sources"]:
@@ -313,7 +294,6 @@ def chat_page(project_id: str) -> None:
                 full_response = f"Error: {response.text}"
                 message_placeholder.markdown(full_response)
 
-# --- Page Routing ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 

@@ -31,7 +31,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     print("Application startup: Initializing...")
     # For development, create DB tables on startup. For production, use Alembic migrations.
     init_db()
-    # Ensure the MinIO bucket exists
     create_minio_bucket_if_not_exists()
     print("Application startup complete.")
     yield
@@ -43,7 +42,6 @@ app: FastAPI = FastAPI(
     description="A multi-tenant API for Retrieval-Augmented Generation (RAG)."
 )
 
-# --- API Router Mounting ---
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(projects.router, prefix="/api/v1/projects", tags=["Projects"])
 app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
