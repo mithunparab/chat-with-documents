@@ -5,65 +5,66 @@ This module initializes the FastAPI app, sets up API routers, and defines
 root and health check endpoints. It also manages application startup and
 shutdown events, including initialization of the RAG service.
 """
-
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from api.v1 import documents, chat
-from services.rag_service import initialize_rag_service
+from app.api.v1 import auth, projects, documents, chat
+from app.db.database import init_db
+from app.services.storage_service import create_minio_bucket_if_not_exists
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
-    Manages application startup and shutdown events.
+    Context manager for FastAPI application lifespan events.
+
+    Handles application startup and shutdown logic, such as initializing
+    the database and ensuring the MinIO bucket exists.
 
     Args:
         app (FastAPI): The FastAPI application instance.
 
     Yields:
-        None: Control is yielded back to FastAPI after startup is complete.
-
-    Notable:
-        - Initializes the RAG service synchronously. This may block the event loop.
-          See TODO for technical debt.
+        None: Control is yielded back to FastAPI after startup logic.
     """
-    print("Application startup: Initializing RAG service...")
-    initialize_rag_service()  # TODO: Refactor to async if RAG service supports it.
-    print("Application startup: RAG service ready.")
+    print("Application startup: Initializing...")
+    # For development, create DB tables on startup. For production, use Alembic migrations.
+    init_db()
+    # Ensure the MinIO bucket exists
+    create_minio_bucket_if_not_exists()
+    print("Application startup complete.")
     yield
     print("Application shutdown.")
 
 app: FastAPI = FastAPI(
     title="Chat with Documents API",
     lifespan=lifespan,
-    description="A headless API for the Retrieval-Augmented Generation (RAG) application."
+    description="A multi-tenant API for Retrieval-Augmented Generation (RAG)."
 )
 
 # --- API Router Mounting ---
-print("Mounting API endpoints...")
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(projects.router, prefix="/api/v1/projects", tags=["Projects"])
 app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
 app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat"])
-print("API endpoints mounted.")
 
 @app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
     """
-    Redirects the root path to the API documentation.
+    Redirects the root endpoint to the API documentation.
 
     Returns:
-        RedirectResponse: Redirects client to the /docs endpoint.
+        RedirectResponse: A redirect response to the /docs endpoint.
     """
     return RedirectResponse(url="/docs")
 
 @app.get("/health", tags=["Health"])
 def health_check() -> dict[str, str]:
     """
-    Health check endpoint to verify server status.
+    Health check endpoint.
 
     Returns:
-        dict[str, str]: A dictionary indicating the server status.
-            Example: {"status": "ok"}
+        dict[str, str]: A dictionary indicating the service status.
     """
     return {"status": "ok"}

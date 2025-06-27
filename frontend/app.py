@@ -5,195 +5,319 @@ This module provides a Streamlit-based user interface for uploading PDF document
 triggering backend processing, and chatting with an assistant about the uploaded content.
 
 TODOs:
-    - TODO: Implement per-user document storage and isolation.
     - TODO: Refactor synchronous file I/O to asynchronous patterns for scalability.
-    - TODO: Add authentication and user session management.
     - TODO: Improve error handling and user feedback for backend failures.
 """
 
 import streamlit as st
 import requests
+import pandas as pd
+import json
+from typing import Dict, Any, List
 import os
-import time
-from typing import List, Dict, Any, Optional
-
-# Configuration
-API_BASE_URL: str = os.getenv("API_URL", "http://api:8000/api/v1")
-st.set_page_config(page_title="Chat with Documents", page_icon="📚", layout="wide")
-
-
-def check_api_health() -> bool:
+# --- Configuration ---
+def get_api_url() -> str:
     """
-    Check if the backend API is reachable, with up to 3 retries.
-
-    Uses a simple cache in Streamlit session state to avoid redundant checks.
-
-    Returns:
-        bool: True if the API is healthy and reachable, False otherwise.
+    Returns the API URL based on environment.
+    Uses Docker host if available, otherwise falls back to localhost.
     """
-    if "api_healthy" in st.session_state and st.session_state.api_healthy:
-        return True
+    return os.getenv("API_URL", "http://api:8000/api/v1" if os.getenv("DOCKER", "1") == "1" else "http://localhost:8000/api/v1")
 
-    for attempt in range(3):
-        try:
-            health_url: str = os.getenv("API_URL", "http://api:8000").replace("/api/v1", "") + "/health"
-            response: requests.Response = requests.get(health_url, timeout=3)
-            if response.status_code == 200:
-                st.session_state.api_healthy = True
-                return True
-        except requests.exceptions.RequestException:
-            print(f"API health check attempt {attempt + 1} failed.")
-            time.sleep(2)
-    st.session_state.api_healthy = False
-    return False
+API_URL = get_api_url()
 
+st.set_page_config(page_title="Chat with Documents", layout="wide")
 
-def save_uploaded_files(uploaded_files: List[Any], data_path: str) -> None:
+# --- Authentication ---
+def login_user(username: str, password: str) -> None:
     """
-    Save uploaded files to the specified directory.
-
-    Args:
-        uploaded_files (List[Any]): List of uploaded file-like objects from Streamlit.
-        data_path (str): Destination directory path.
-
-    Returns:
-        None
-
-    Technical Debt:
-        - Synchronous file I/O is used; consider refactoring to async for scalability.
+    Authenticates the user and stores token in session state.
     """
-    os.makedirs(data_path, exist_ok=True)
-    for file in uploaded_files:
-        with open(os.path.join(data_path, file.name), "wb") as f:
-            f.write(file.getbuffer())
+    try:
+        response = requests.post(f"{API_URL}/auth/token", data={"username": username, "password": password})
+        if response.status_code == 200:
+            st.session_state.token = response.json()["access_token"]
+            st.session_state.username = username
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.error("Login failed. Please check your username and password.")
+    except requests.RequestException as e:
+        st.error(f"Connection to API failed: {e}")
 
-
-def trigger_document_processing(api_base_url: str) -> requests.Response:
+def signup_user(username: str, password: str) -> None:
     """
-    Trigger the backend API to process documents in the shared folder.
-
-    Args:
-        api_base_url (str): Base URL of the backend API.
-
-    Returns:
-        requests.Response: Response object from the backend API.
+    Registers a new user.
     """
-    process_url: str = f"{api_base_url}/documents/process"
-    return requests.post(process_url)
+    try:
+        response = requests.post(f"{API_URL}/auth/signup", json={"username": username, "password": password})
+        if response.status_code == 200:
+            st.success("Signup successful! Please log in.")
+        else:
+            detail = response.json().get('detail', 'Unknown error')
+            st.error(f"Signup failed: {detail}")
+    except requests.RequestException as e:
+        st.error(f"Connection to API failed: {e}")
 
-
-def display_chat_history(messages: List[Dict[str, str]]) -> None:
+def auth_page() -> None:
     """
-    Render the chat history in the Streamlit UI.
-
-    Args:
-        messages (List[Dict[str, str]]): List of chat messages with 'role' and 'content'.
-
-    Returns:
-        None
+    Renders the authentication page for login and signup.
     """
-    for message in messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    st.title("Welcome to Chat with Documents")
+    login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
 
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                login_user(username, password)
 
-def handle_user_prompt(prompt: str, api_base_url: str) -> str:
+    with signup_tab:
+        with st.form("signup_form"):
+            new_username = st.text_input("Choose a Username")
+            new_password = st.text_input("Choose a Password", type="password")
+            submitted = st.form_submit_button("Sign Up")
+            if submitted:
+                signup_user(new_username, new_password)
+
+# --- API Helpers ---
+def get_auth_headers() -> Dict[str, str]:
     """
-    Send the user's prompt to the backend API and display the assistant's response.
-
-    Args:
-        prompt (str): User's input question.
-        api_base_url (str): Base URL of the backend API.
-
-    Returns:
-        str: The assistant's full response (including sources if available).
+    Returns the authorization headers for API requests.
     """
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        full_response: str = ""
-        try:
-            chat_url: str = f"{api_base_url}/chat/"
-            payload: Dict[str, str] = {"query": prompt}
-            response: requests.Response = requests.post(chat_url, json=payload)
+    return {"Authorization": f"Bearer {st.session_state.token}"}
 
-            if response.status_code == 200:
-                data: Dict[str, Any] = response.json()
-                answer: str = data.get("answer", "Sorry, I couldn't find an answer.")
-                sources: List[str] = data.get("sources", [])
+def get_projects() -> List[Dict[str, Any]]:
+    """
+    Fetches the list of projects for the authenticated user.
+    """
+    try:
+        res = requests.get(f"{API_URL}/projects/", headers=get_auth_headers())
+        return res.json() if res.status_code == 200 else []
+    except Exception:
+        return []
 
-                for chunk in answer.split():
-                    full_response += chunk + " "
-                    message_placeholder.markdown(full_response + "▌")
+def create_project(name: str) -> Dict[str, Any]:
+    """
+    Creates a new project.
+    """
+    res = requests.post(f"{API_URL}/projects/", json={"name": name}, headers=get_auth_headers())
+    return res.json()
 
-                if sources:
-                    full_response += "\n\n**Sources:**\n"
-                    for source in sources:
-                        full_response += f"- `{source}`\n"
+# --- Main App ---
+def main_app() -> None:
+    """
+    Main application logic for authenticated users.
+    """
+    st.sidebar.title(f"Welcome, {st.session_state.username}!")
 
-                message_placeholder.markdown(full_response)
-            elif response.status_code == 404:
-                full_response = "I couldn't find a relevant answer in the provided documents."
-                message_placeholder.markdown(full_response)
-            else:
-                full_response = f"Error: Received status code {response.status_code}\n\n{response.text}"
-                message_placeholder.markdown(full_response)
+    # Project Selection
+    projects = get_projects()
+    project_names = [p['name'] for p in projects]
+    st.sidebar.header("Projects")
+    if 'current_project_name' not in st.session_state:
+        st.session_state.current_project_name = project_names[0] if project_names else None
 
-        except requests.exceptions.RequestException as e:
-            full_response = f"Error: Could not connect to the API. {e}"
-            message_placeholder.markdown(full_response)
-
-    return full_response
-
-
-# --- UI Layout ---
-st.title("📚 Chat with Your Documents")
-
-# --- State Management ---
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! Upload your documents and ask me anything about them."}
-    ]
-
-# --- Sidebar for Document Management ---
-with st.sidebar:
-    st.header("Document Management")
-
-    uploaded_files: Optional[List[Any]] = st.file_uploader(
-        "Upload your PDF documents",
-        type="pdf",
-        accept_multiple_files=True,
-        label_visibility="collapsed"
+    selected_project_name = st.sidebar.selectbox(
+        "Select a Project", project_names,
+        index=project_names.index(st.session_state.current_project_name) if st.session_state.current_project_name in project_names and project_names else 0
     )
 
-    if st.button("Process Documents", use_container_width=True):
-        if uploaded_files:
-            with st.spinner("Processing documents... This may take a moment."):
-                try:
-                    # TODO: Implement per-user document storage and isolation.
-                    data_path: str = "/data/books"  # Path inside the container (shared volume)
-                    save_uploaded_files(uploaded_files, data_path)
-                    response: requests.Response = trigger_document_processing(API_BASE_URL)
-                    if response.status_code == 202:
-                        st.success("✅ Documents are being processed in the background! You can start chatting soon.")
-                    else:
-                        st.error(f"Error processing: {response.text}")
-                except Exception as e:
-                    st.error(f"An error occurred: {e}")
+    if selected_project_name != st.session_state.current_project_name:
+        st.session_state.current_project_name = selected_project_name
+        # Reset chat when project changes
+        st.session_state.messages = {}
+        st.session_state.current_chat_id = None
+
+    project_id = next((p['id'] for p in projects if p['name'] == selected_project_name), None)
+    st.session_state.current_project_id = project_id
+
+    with st.sidebar.expander("Create New Project"):
+        with st.form("new_project_form", clear_on_submit=True):
+            new_project_name = st.text_input("Project Name")
+            if st.form_submit_button("Create") and new_project_name:
+                create_project(new_project_name)
+                st.rerun()
+
+    if not project_id:
+        st.header("Create your first project to get started!")
+        return
+
+    # Page selection
+    page = st.sidebar.radio("Navigate", ["Chat", "Manage Documents"])
+
+    if page == "Chat":
+        chat_page(project_id)
+    elif page == "Manage Documents":
+        documents_page(project_id)
+
+    if st.sidebar.button("Logout"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+def documents_page(project_id: str) -> None:
+    """
+    Renders the document management page for a project.
+    """
+    st.header(f"Manage Documents for '{st.session_state.current_project_name}'")
+
+    # Uploader
+    with st.expander("Upload New Documents", expanded=True):
+        st.subheader("Upload Files")
+        uploaded_files = st.file_uploader(
+            "Upload PDF, DOCX, TXT, or MD files",
+            type=["pdf", "docx", "txt", "md"],
+            accept_multiple_files=True
+        )
+        if st.button("Upload and Process Files"):
+            if uploaded_files:
+                with st.spinner("Uploading..."):
+                    for file in uploaded_files:
+                        files = {'file': (file.name, file.getvalue(), file.type)}
+                        try:
+                            requests.post(f"{API_URL}/documents/upload/{project_id}", files=files, headers=get_auth_headers())
+                        except Exception as e:
+                            st.error(f"Failed to upload {file.name}: {e}")
+                    st.success("Files uploaded! Processing has started in the background.")
+                    st.rerun()
+            else:
+                st.warning("Please select at least one file to upload.")
+
+        st.subheader("Add from URL")
+        url = st.text_input("Enter a URL to scrape and add")
+        if st.button("Add URL"):
+            if url:
+                with st.spinner("Scraping and processing URL..."):
+                    payload = {"url": url}
+                    try:
+                        requests.post(f"{API_URL}/documents/upload_url/{project_id}", json=payload, headers=get_auth_headers())
+                        st.success("URL added! Processing has started.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to add URL: {e}")
+            else:
+                st.warning("Please enter a URL.")
+
+    # Document List
+    st.subheader("Uploaded Documents")
+    try:
+        docs_res = requests.get(f"{API_URL}/documents/{project_id}", headers=get_auth_headers())
+        if docs_res.status_code == 200:
+            docs = docs_res.json()
+            if docs:
+                df = pd.DataFrame(docs)
+                st.dataframe(df[['file_name', 'status', 'created_at']], use_container_width=True)
+            else:
+                st.info("No documents found in this project yet.")
         else:
-            st.warning("⚠️ Please upload at least one PDF file.")
+            st.error("Failed to fetch documents.")
+    except Exception as e:
+        st.error(f"Error fetching documents: {e}")
 
-    if not check_api_health():
-        st.error("🔴 Backend API is not reachable. Please ensure the backend service is running.")
-    else:
-        st.success("✅ Backend API is connected.")
+def chat_page(project_id: str) -> None:
+    """
+    Renders the chat interface for a project.
+    """
+    st.header(f"Chat with '{st.session_state.current_project_name}'")
 
-# --- Main Chat Interface ---
-display_chat_history(st.session_state.messages)
+    if 'messages' not in st.session_state:
+        st.session_state.messages = {}  # Dict of {chat_id: [messages]}
 
-if prompt := st.chat_input("What is this document about?"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    if 'current_chat_id' not in st.session_state:
+        st.session_state.current_chat_id = None
 
-    assistant_response: str = handle_user_prompt(prompt, API_BASE_URL)
-    st.session_state.messages.append({"role": "assistant", "content": assistant_response})
+    # Load chat history for the project
+    try:
+        history_res = requests.get(f"{API_URL}/chat/sessions/{project_id}", headers=get_auth_headers())
+        if history_res.status_code == 200:
+            sessions = history_res.json()
+            with st.sidebar:
+                st.subheader("Chat History")
+                if st.button("➕ New Chat"):
+                    st.session_state.current_chat_id = None
+                    st.rerun()
+
+                for session in sessions:
+                    if st.button(session['title'], key=session['id'], use_container_width=True):
+                        st.session_state.current_chat_id = session['id']
+                        # Load messages for this chat
+                        try:
+                            msgs_res = requests.get(f"{API_URL}/chat/sessions/{project_id}/{session['id']}", headers=get_auth_headers())
+                            if msgs_res.status_code == 200:
+                                st.session_state.messages[session['id']] = msgs_res.json()['messages']
+                        except Exception:
+                            pass
+                        st.rerun()
+    except Exception:
+        st.sidebar.error("Failed to load chat history.")
+
+    # Display current chat messages
+    chat_key = st.session_state.current_chat_id
+    if chat_key and chat_key in st.session_state.messages:
+        for msg in st.session_state.messages[chat_key]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("sources"):
+                    with st.expander("Sources"):
+                        try:
+                            sources = json.loads(msg["sources"]) if isinstance(msg["sources"], str) else msg["sources"]
+                            for source in sources:
+                                st.info(f"Source: {source.get('source', 'N/A')}")
+                                st.text(source.get('content', ''))
+                        except Exception:
+                            st.warning("Could not parse sources.")
+
+    # Chat input
+    prompt = st.chat_input("Ask a question about your documents...")
+    if prompt:
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Prepare payload
+        payload = {"query": prompt}
+        if st.session_state.current_chat_id:
+            payload["chat_id"] = st.session_state.current_chat_id
+
+        # Call API
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_response = ""
+            with st.spinner("Thinking..."):
+                try:
+                    response = requests.post(f"{API_URL}/chat/{project_id}", json=payload, headers=get_auth_headers())
+                except Exception as e:
+                    message_placeholder.markdown(f"Error: {e}")
+                    return
+
+            if response.status_code == 200:
+                data = response.json()
+                full_response = data.get("answer", "No answer found.")
+                message_placeholder.markdown(full_response)
+
+                # Update session state with new chat ID if it's a new chat
+                if not st.session_state.current_chat_id:
+                    st.session_state.current_chat_id = data['chat_id']
+                    st.session_state.messages[data['chat_id']] = []
+                    st.rerun()  # Rerun to show history list
+
+                # Display sources
+                if data.get("sources"):
+                    with st.expander("Sources"):
+                        for source in data["sources"]:
+                            st.info(f"Source: {source.get('source', 'N/A')}")
+                            st.text(source.get('content', ''))
+            else:
+                full_response = f"Error: {response.text}"
+                message_placeholder.markdown(full_response)
+
+# --- Page Routing ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if st.session_state.logged_in:
+    main_app()
+else:
+    auth_page()
