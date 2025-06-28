@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "chat-with-docs-saas"
-version = "1.0.0"
-description = "Multi-tenant SaaS for chatting with documents"
+version = "0.1.1"
+description = "Integrate Celery with Redis, Enhance Logging, UX, and Task Feedback"
 authors = ["Mithun Parab"]
 readme = "README.md"
 

@@ -13,8 +13,8 @@ from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
 from groq import Groq as GroqClient
 from langchain.prompts import ChatPromptTemplate
-from langchain.retrievers import BM25Retriever, EnsembleRetriever
-
+from langchain.retrievers import EnsembleRetriever
+from langchain_community.retrievers import BM25Retriever
 from chromadb.config import Settings as ChromaSettings
 
 from app.core.config import settings
