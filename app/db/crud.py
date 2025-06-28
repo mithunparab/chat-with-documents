@@ -187,4 +187,49 @@ def add_chat_message(db: Session, session_id: uuid.UUID, message: schemas.ChatMe
     db.refresh(db_message)
     return db_message
 
+def delete_document(db: Session, document_id: uuid.UUID) -> models.Document | None:
+    """
+    Delete a document by its UUID.
+    Args:
+        db (Session): SQLAlchemy session.
+        document_id (uuid.UUID): Document UUID.
+    Returns:
+        Deleted Document instance or None if not found.
+    """
+    db_doc = db.query(models.Document).filter(models.Document.id == document_id).first()
+    if db_doc:
+        db.delete(db_doc)
+        db.commit()
+    return db_doc
+
+def delete_chat_session(db: Session, session_id: uuid.UUID) -> models.ChatSession | None:
+    """
+    Delete a chat session by its UUID.
+    Args:
+        db (Session): SQLAlchemy session.
+        session_id (uuid.UUID): ChatSession UUID.
+    Returns:
+        Deleted ChatSession instance or None if not found.
+    """
+    db_session = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
+    if db_session:
+        db.delete(db_session)
+        db.commit()
+    return db_session
+
+def delete_user(db: Session, user_id: uuid.UUID) -> models.User | None:
+    """
+    Delete a user by their UUID.
+    Args:
+        db (Session): SQLAlchemy session.
+        user_id (uuid.UUID): User's UUID.
+    Returns:
+        Deleted User instance or None if not found.
+    """
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if db_user:
+        db.delete(db_user)
+        db.commit()
+    return db_user
+
 # TODO: Add error handling and logging for CRUD operations.

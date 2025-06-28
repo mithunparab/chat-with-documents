@@ -1,6 +1,6 @@
 import uuid
 import json
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
@@ -9,7 +9,9 @@ from app.db import crud, models, schemas
 from app.db.database import get_db
 from app.core.dependencies import get_current_user
 from app.services.rag_service import RAGService
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class ChatRequest(BaseModel):
@@ -119,3 +121,51 @@ def get_chat_session_messages(
     if not session or session.project.owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Chat session not found")
     return session
+
+@router.delete(
+    "/sessions/{project_id}/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a chat session"
+)
+def delete_chat_session_endpoint(
+    project_id: uuid.UUID,
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+) -> Response:
+    """
+    Delete a specific chat session and all its associated messages for a given project.
+
+    Args:
+        project_id (uuid.UUID): The project identifier.
+        session_id (uuid.UUID): The chat session identifier.
+        db (Session): Database session dependency.
+        current_user (models.User): Authenticated user dependency.
+
+    Returns:
+        Response: HTTP 204 No Content on successful deletion.
+
+    Raises:
+        HTTPException: If the chat session is not found or access is denied.
+    """
+    logger.info(f"User '{current_user.username}' attempting to delete chat session '{session_id}' from project '{project_id}'")
+
+    session_to_delete = crud.get_chat_session(db, session_id=session_id, project_id=project_id)
+
+    if not session_to_delete:
+        logger.warning(f"Chat session '{session_id}' not found for project '{project_id}'.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found.")
+
+    if session_to_delete.project.owner_id != current_user.id:
+        logger.warning(f"Access denied: User '{current_user.username}' does not own project for chat session '{session_id}'.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to delete this chat session.")
+
+    try:
+        crud.delete_chat_session(db, session_id=session_id)
+        logger.info(f"Successfully deleted chat session '{session_id}'.")
+    except Exception as e:
+        logger.error(f"Database error while deleting chat session '{session_id}': {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not delete chat session.")
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

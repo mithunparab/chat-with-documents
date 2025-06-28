@@ -34,6 +34,10 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: chat_with_docs_redis
+
   api:
     build:
       context: .
@@ -43,6 +47,9 @@ services:
       - "8000:8000"
     volumes:
       - ./app:/app/app
+      - chroma_data:/app/chroma_data
+
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - .env
     depends_on:
@@ -50,12 +57,33 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      redis: 
+        condition: service_started
+    environment:
+      - POSTGRES_SERVER=postgres
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 10s
       retries: 5
       start_period: 30s
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chat_with_docs_celery
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    volumes:
+      - ./app:/app/app
+      - chroma_data:/app/chroma_data
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_SERVER=postgres
+    depends_on:
+      - api
+      - redis
 
   frontend:
     build:
@@ -76,3 +104,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  chroma_data:

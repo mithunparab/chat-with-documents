@@ -14,27 +14,30 @@ from app.api.v1 import auth, projects, documents, chat
 from app.db.database import init_db
 from app.services.storage_service import create_minio_bucket_if_not_exists
 
+import logging
+from app.core.logging_config import setup_logging
+
+# Call setup function at the top level
+setup_logging()
+logger = logging.getLogger(__name__)
+
+
+
+setup_logging()
+logger = logging.getLogger(__name__)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Context manager for FastAPI application lifespan events.
-
-    Handles application startup and shutdown logic, such as initializing
-    the database and ensuring the MinIO bucket exists.
-
-    Args:
-        app (FastAPI): The FastAPI application instance.
-
-    Yields:
-        None: Control is yielded back to FastAPI after startup logic.
     """
-    print("Application startup: Initializing...")
-    # For development, create DB tables on startup. For production, use Alembic migrations.
+    logger.info("Application startup: Initializing...")
+    # RESTORE THE init_db() CALL
     init_db()
     create_minio_bucket_if_not_exists()
-    print("Application startup complete.")
+    logger.info("Application startup complete.")
     yield
-    print("Application shutdown.")
+    logger.info("Application shutdown.")
 
 app: FastAPI = FastAPI(
     title="Chat with Documents API",

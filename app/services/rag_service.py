@@ -1,7 +1,7 @@
 import tempfile
 from typing import List, Tuple, Dict, Any, Optional
 import httpx
-
+import chromadb
 from langchain_community.document_loaders import (
     PyPDFLoader, UnstructuredURLLoader, UnstructuredWordDocumentLoader,
     UnstructuredMarkdownLoader, TextLoader
@@ -20,6 +20,8 @@ from chromadb.config import Settings as ChromaSettings
 from app.core.config import settings
 from app.services import storage_service
 from app.db.models import Project, User
+import logging
+logger = logging.getLogger(__name__)
 
 class RAGService:
     """
@@ -46,21 +48,17 @@ class RAGService:
         self.project = project
         self.collection_name = f"proj_{str(project.id).replace('-', '')}"
         self.embedding_function = GoogleGenerativeAIEmbeddings(model=settings.EMBEDDING_MODEL_NAME)
+        
         http_client = httpx.Client(proxies=None)
-        root_groq_client = GroqClient(
-            api_key=settings.GROQ_API_KEY,
-            http_client=http_client
-        )
-        self.llm = ChatGroq(
-            model=settings.LLM_MODEL_NAME, 
-            client=root_groq_client.chat.completions
-        )
-        chroma_client_settings = ChromaSettings(anonymized_telemetry=False)
+        root_groq_client = GroqClient(api_key=settings.GROQ_API_KEY, http_client=http_client)
+        self.llm = ChatGroq(model=settings.LLM_MODEL_NAME, client=root_groq_client.chat.completions)
+
+        chroma_client = chromadb.PersistentClient(path=settings.CHROMA_PATH, settings=ChromaSettings(anonymized_telemetry=False))
+        
         self.vectorstore = Chroma(
+            client=chroma_client, 
             collection_name=self.collection_name,
-            persist_directory=settings.CHROMA_PATH,
             embedding_function=self.embedding_function,
-            client_settings=chroma_client_settings
         )
 
     def _get_loader(self, file_path: Optional[str], file_type: str, url: Optional[str] = None) -> Any:
@@ -105,7 +103,7 @@ class RAGService:
             file_name (str): Name of the file.
             url (Optional[str]): URL to load document from.
         """
-        print(f"Processing document: {storage_key} for project {self.project.name}")
+        logger.info(f"Processing document: {storage_key} for project {self.project.name}")
         if url:
             loader = self._get_loader(None, file_type, url=url)
             docs = loader.load()
@@ -121,12 +119,15 @@ class RAGService:
             chunk_overlap=settings.CHUNK_OVERLAP
         )
         chunks = text_splitter.split_documents(docs)
-        print(f"Split into {len(chunks)} chunks.")
+        logger.info(f"Split into {len(chunks)} chunks.")
+        
         if not chunks:
-            print(f"Warning: No text could be extracted from {file_name}. Skipping.")
+            logger.warning(f"Warning: No text could be extracted from {file_name}. Skipping.")
             return
+
+        # This will now write to the persistent client's storage
         self.vectorstore.add_documents(documents=chunks)
-        print(f"Added {len(chunks)} chunks to collection '{self.collection_name}'.")
+        logger.info(f"Added {len(chunks)} chunks to collection '{self.collection_name}'.")
 
     def _get_ensemble_retriever(self, chunks: List[Document]) -> EnsembleRetriever:
         """
