@@ -1,102 +1,120 @@
-# 📚 Chat with Documents
+## Chat with Documents
 
-A powerful AI-powered document chatbot that lets you query and interact with your PDF documents using advanced language models and vector search.
+This application allows you to upload documents and interact with them using an AI assistant. You can ask questions about your documents and receive answers with source citations.
 
-## ✨ Features
+### Features
 
-- 🔍 Intelligent Document Search: Fast, accurate retrieval using ChromaDB vector search
-- 🤖 Multiple AI Models: Supports Groq's language models for high-quality responses
-- 📄 PDF Processing: Automatically processes and indexes PDF documents
-- ⚡ Real-time Responses: Typewriter animation for engaging user experience
-- 🎯 Context-Aware: Answers with relevant context and source citations
-- 🖥️ Modern UI: Clean, responsive web interface for chatting with your documents
-- 🔧 Easy Configuration: Simple setup with environment variables
-
-## 🚀 Quick Start
+* Upload documents (PDF, DOCX, TXT, MD)
+* Add content from URLs
+* Chat with your documents using a Large Language Model
+* View source citations for answers
+* Manage projects to organize your documents
+* User authentication and multi-tenancy
 
 ### Prerequisites
 
-- Docker & Docker Compose installed
-- Google AI API Key
-- Groq API Key
+* Docker and Docker Compose installed
+* Google AI API Key (for embeddings and LLM)
+* Groq API Key (for LLM)
 
-### Running the Project
+### Setup and Running
 
-1. **Stop and clean up any previous containers and data**
-   ```bash
-   docker-compose down --remove-orphans
-   rm -rf ./data/books/* ./chroma/*/Volumes/FLASH_128GB/Mit_drive/Code/chat-with-documents/.env
-   docker-compose up --build
-   ```
+1. **Clone the repository:**
 
-2. **Add your PDF documents**
-   - Place your PDF files in the `data/books/` directory.
+    ```bash
+    git clone <your-repository-url>
+    cd chat-with-documents
+    ```
 
-3. **Start the application**
-   ```bash
-   docker-compose up --build
-   ```
+2. **Create a `.env` file:**
+    In the root directory of the project, create a file named `.env` and add your API keys:
 
-4. **Access the frontend**
-   - Open [http://0.0.0.0:8501/](http://0.0.0.0:8501/) in your browser.
+    ```env
+    GOOGLE_API_KEY=your_google_api_key_here
+    GROQ_API_KEY=your_groq_api_key_here
+    # --- Database Credentials ---
+    # If running locally or need to override Docker defaults:
+    # POSTGRES_USER=your_postgres_user
+    # POSTGRES_PASSWORD=your_postgres_password
+    # POSTGRES_DB=your_postgres_db
+    # POSTGRES_SERVER=localhost
+    # POSTGRES_PORT=5432
+    # --- MinIO Credentials ---
+    # If running locally or need to override Docker defaults:
+    # MINIO_ROOT_USER=your_minio_access_key
+    # MINIO_ROOT_PASSWORD=your_minio_secret_key
+    # --- JWT Secret ---
+    JWT_SECRET_KEY=your_jwt_secret_key_here
+    JWT_ALGORITHM=HS256
+    ```
 
-### Environment Variables
+    *Note: The `POSTGRES_SERVER` should be `postgres` when running within Docker Compose, and `localhost` for local development commands.*
 
-Create a `.env` file in the root directory with your API keys:
-```env
-GOOGLE_API_KEY=your_google_api_key_here
-GROQ_API_KEY=your_groq_api_key_here
-```
+3. **Build and Run with Docker Compose:**
 
-## 🖥️ User Interface
+    ```bash
+    docker-compose up --build
+    ```
 
-The UI is built with Streamlit for a fast, interactive chat experience:
-- Upload and manage PDFs
-- Ask questions and get instant answers
-- View source citations for every response
+    This command will build the Docker images, set up the containers (PostgreSQL, MinIO, API, Frontend), and start them.
 
-- Start the stack with Docker Compose
-- Interact via the web UI at [http://0.0.0.0:8501/](http://0.0.0.0:8501/)
+4. **Access the Application:**
+    Open your web browser and go to:
+    [http://localhost:8501](http://localhost:8501)
 
-
-## 📁 Project Structure
+### Project Structure
 
 ```
 .
-├── app
-│   ├── __init__.py
-│   ├── api
-│   │   ├── __init__.py
-│   │   └── v1
-│   │       ├── __init__.py
-│   │       ├── chat.py
-│   │       └── documents.py
-│   ├── core
-│   │   ├── __init__.py
-│   │   └── config.py
-│   ├── main.py
-│   └── services
-│       ├── __init__.py
-│       └── rag_service.py
-├── chroma
-├── cli.py
-├── data
-│   └── books
-├── docker-compose.yml
-├── Dockerfile
-├── frontend
-│   ├── app.py
-│   ├── Dockerfile
-│   └── requirements.txt
-├── pyproject.toml
 ├── README.md
-└── requirements.txt
+├── cli.py                  # Command-line interface (less used now)
+├── docker-compose.yml      # Orchestrates all services
+├── Dockerfile              # For the main API service
+├── pyproject.toml          # Project dependencies and metadata
+├── .env                    # Environment variables (API keys, DB creds)
+├── .python-version         # Specifies Python version
+├── alembic/                # Alembic migration scripts (if used)
+├── alembic.ini             # Alembic configuration (if used)
+├── app/                    # Backend API code
+│   ├── __init__.py
+│   ├── main.py             # FastAPI application entry point
+│   ├── api/                # API endpoints
+│   │   ├── __init__.py
+│   │   └── v1/             # API version 1
+│   │       ├── __init__.py
+│   │       ├── auth.py     # User signup and login
+│   │       ├── chat.py     # Chat functionalities
+│   │       ├── documents.py# Document upload and management
+│   │       └── projects.py # Project management
+│   ├── auth/               # Authentication logic
+│   │   ├── jwt.py          # JWT token handling
+│   │   └── schemas.py      # Pydantic schemas for auth
+│   ├── core/               # Core application logic
+│   │   ├── __init__.py
+│   │   ├── config.py       # Application settings
+│   │   ├── dependencies.py # FastAPI dependencies (e.g., get_current_user)
+│   │   ├── logging_config.py # Logging setup
+│   │   └── celery_app.py   # Celery application instance
+│   ├── db/                 # Database interactions
+│   │   ├── crud.py         # Database CRUD operations
+│   │   ├── database.py     # Database connection and session management
+│   │   ├── models.py       # SQLAlchemy ORM models
+│   │   └── schemas.py      # Pydantic schemas for database operations
+│   ├── services/           # Business logic services
+│   │   ├── __init__.py
+│   │   ├── rag_service.py  # AI/RAG logic for chatting with documents
+│   │   └── storage_service.py # MinIO/S3 file storage interaction
+│   └── tasks.py            # Celery tasks (e.g., document processing)
+└── frontend/               # Streamlit frontend code
+    ├── app.py              # Main Streamlit application
+    ├── Dockerfile          # Dockerfile for the frontend service
+    └── requirements.txt    # Frontend dependencies
 ```
 
-## 🔧 Troubleshooting
+### Troubleshooting
 
-- Ensure your `.env` file contains valid API keys and is in the root directory.
-- Use `docker-compose logs` to view logs for debugging.
-- For UI issues, check the Streamlit logs in the frontend container.
+* **Connection Refused:** Ensure `docker-compose up` is running. If connecting locally via `localhost:8501`, make sure your API is running on `localhost:8000`. If running in Docker and connecting via `http://api:8000`, ensure the `api` service is healthy. Check environment variables in `.env` and `docker-compose.yml`.
+* **Database Errors:** Ensure your `POSTGRES_SERVER` setting correctly points to `localhost` for local commands and `postgres` for Docker containers. Verify the `postgres` container is healthy and running. If tables are missing, try removing the `postgres_data` Docker volume (`docker volume rm <your_volume_name>`) and restarting `docker-compose up --build`.
+* **API Errors (500):** Check the `chat_with_docs_api` container logs for detailed Python tracebacks.
 
 ---
