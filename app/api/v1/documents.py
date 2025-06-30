@@ -146,13 +146,18 @@ def delete_document(
         raise HTTPException(status_code=404, detail="Document not found in this project.")
 
     try:
-        logger.info(f"Attempting to delete chunks for document {doc_to_delete.id} (vector store deletion logic to be implemented).")
+        # Step 1: Delete chunks from the vector store
+        logger.info(f"Attempting to delete chunks for document {doc_to_delete.id}.")
+        rag_service = RAGService(user=current_user, project=project)
+        rag_service.delete_document_chunks(document_id=str(doc_to_delete.id))
 
+        # Step 2: Delete the file from object storage
         if not storage_service.delete_file(doc_to_delete.storage_key):
             logger.error(f"Could not delete file '{doc_to_delete.storage_key}' from storage. Continuing with DB deletion.")
         else:
             logger.info(f"Successfully deleted file '{doc_to_delete.storage_key}' from storage.")
 
+        # Step 3: Delete the document record from the database
         db.delete(doc_to_delete)
         db.commit()
         logger.info(f"Successfully deleted document record '{doc_to_delete.id}' from database.")

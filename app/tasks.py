@@ -39,7 +39,8 @@ def process_document_task(
             return
 
         rag_service = RAGService(user=user, project=project)
-        rag_service.process_document(storage_key, file_type, file_name, url)
+        # Pass document_id to the service to associate chunks with it
+        rag_service.process_document(storage_key, file_type, file_name, document_id, url)
         crud.update_document_status(db, doc_uuid, schemas.DocumentStatus.COMPLETED)
         logger.info(f"Successfully processed document_id: {document_id}")
     except Exception as e:
