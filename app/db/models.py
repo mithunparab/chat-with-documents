@@ -38,6 +38,8 @@ class Project(Base):
     __tablename__ = "projects"
     id: uuid.UUID = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: str = Column(String, index=True, nullable=False)
+    llm_provider: str = Column(String, nullable=False, default="groq") 
+    llm_model_name: str = Column(String, nullable=True) 
     owner_id: uuid.UUID = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     owner = relationship("User", back_populates="projects")
     documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 200
     LLM_MODEL_NAME: str = "llama3-8b-8192"
     EMBEDDING_MODEL_NAME: str = "models/embedding-001"
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
 
     # --- Database Settings ---
     POSTGRES_USER: str

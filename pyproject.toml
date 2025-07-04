@@ -19,6 +19,7 @@ langchain-groq = "^0.1.5"
 langchain-google-genai = "^1.0.5"
 langchain-chroma = "^0.1.1"
 groq = "^0.9.0"
+ollama = "^0.2.1" 
 
 # Document Loaders
 unstructured = {extras = ["pdf", "md", "docx"], version = "^0.14.5"}

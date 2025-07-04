@@ -15,6 +15,8 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
 from groq import Groq as GroqClient
+from langchain_community.chat_models.ollama import ChatOllama
+
 from langchain.prompts import ChatPromptTemplate
 from langchain.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
@@ -34,9 +36,21 @@ class RAGService:
         self.collection_name: str = f"proj_{str(project.id).replace('-', '')}"
         self.embedding_function = GoogleGenerativeAIEmbeddings(model=settings.EMBEDDING_MODEL_NAME)
         
-        http_client = httpx.Client(proxies=None)
-        root_groq_client = GroqClient(api_key=settings.GROQ_API_KEY, http_client=http_client)
-        self.llm = ChatGroq(model=settings.LLM_MODEL_NAME, client=root_groq_client.chat.completions)
+        if self.project.llm_provider == "ollama":
+            logger.info(f"Initializing RAGService with OLLAMA provider. Model: {self.project.llm_model_name}")
+            self.llm = ChatOllama(
+                model=self.project.llm_model_name or "gemma3:4b",
+                base_url=settings.OLLAMA_BASE_URL,
+                temperature=0.2 
+            )
+        else: # Default to Groq
+            logger.info(f"Initializing RAGService with GROQ provider. Model: {self.project.llm_model_name}")
+            http_client = httpx.Client(proxies=None)
+            root_groq_client = GroqClient(api_key=settings.GROQ_API_KEY, http_client=http_client)
+            self.llm = ChatGroq(
+                model=self.project.llm_model_name or settings.LLM_MODEL_NAME, # Default to global setting
+                client=root_groq_client.chat.completions
+            )
 
         try:
             self.redis_client: Optional[redis.Redis] = redis.from_url(settings.CELERY_BROKER_URL)

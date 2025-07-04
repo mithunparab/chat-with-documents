@@ -117,10 +117,17 @@ def get_projects() -> List[Dict[str, Any]]:
         st.error(f"Error fetching projects: {e}")
         return []
 
-def create_project(name: str) -> Optional[Dict[str, Any]]:
+def create_project(name: str, provider: str, model_name: str) -> Optional[Dict[str, Any]]: # <-- Modify signature
     """Creates a new project."""
     try:
-        res = requests.post(f"{API_URL}/projects/", json={"name": name}, headers=get_auth_headers())
+        # --- MODIFY PAYLOAD ---
+        payload = {
+            "name": name,
+            "llm_provider": provider,
+            "llm_model_name": model_name if model_name else None
+        }
+        res = requests.post(f"{API_URL}/projects/", json=payload, headers=get_auth_headers())
+        # --- END MODIFICATION ---
         res.raise_for_status()
         st.success(f"Project '{name}' created successfully!")
         return res.json()
@@ -237,6 +244,15 @@ def project_sidebar():
     st.sidebar.title(f"Welcome, {st.session_state.username}!")
     projects = get_projects()
     project_names = [p['name'] for p in projects]
+    
+    # Display current project's LLM provider
+    if st.session_state.get('current_project_name'):
+        current_project_details = next((p for p in projects if p['name'] == st.session_state.current_project_name), None)
+        if current_project_details:
+            provider = current_project_details.get('llm_provider', 'groq').upper()
+            model = current_project_details.get('llm_model_name')
+            st.sidebar.caption(f"Provider: {provider} | Model: {model}")
+            
     st.sidebar.header("Projects")
     if 'current_project_name' not in st.session_state or st.session_state.current_project_name not in project_names:
         st.session_state.current_project_name = project_names[0] if project_names else None
@@ -258,32 +274,32 @@ def project_sidebar():
     with st.sidebar.expander("Create New Project", expanded=False):
         with st.form("new_project_form", clear_on_submit=True):
             new_project_name = st.text_input("Project Name")
+            
+            llm_provider = st.selectbox(
+                "Select LLM Provider",
+                options=["groq", "ollama"],
+                format_func=lambda x: "Groq API (Cloud)" if x == "groq" else "Ollama (Local)"
+            )
+            
+            # Set default model names based on provider
+            default_model = ""
+            if llm_provider == "groq":
+                default_model = "llama3-8b-8192"
+            elif llm_provider == "ollama":
+                default_model = "gemma3:4b"
+
+            llm_model_name = st.text_input("LLM Model Name", value=default_model, help="e.g., llama3-8b-8192 for Groq, or gemma3:4b for Ollama")
+
             if st.form_submit_button("Create"):
                 if new_project_name:
-                    created_project = create_project(new_project_name)
+                    created_project = create_project(new_project_name, llm_provider, llm_model_name)
                     if created_project:
                         st.session_state.current_project_name = created_project['name']
                         st.rerun()
                 else:
                     st.warning("Project name cannot be empty.")
-    st.sidebar.header("Chat History")
-    if project_id:
-        chat_sessions = get_chat_sessions(project_id)
-        if st.sidebar.button("➕ New Chat", key="new_chat_btn"):
-            st.session_state.current_chat_id = None
-            st.session_state.messages = {}
-            st.rerun()
-        for session in chat_sessions:
-            col_title, col_del = st.sidebar.columns([3, 1])
-            col_title.button(session['title'], key=f"session_{session['id']}", use_container_width=True, on_click=select_chat_session, args=(project_id, session['id'], session['messages']))
-            if col_del.button("🗑️", key=f"del_session_{session['id']}", type="primary", use_container_width=True):
-                if delete_chat_session(project_id, session['id']):
-                    if st.session_state.current_chat_id == session['id']:
-                        st.session_state.current_chat_id = None
-                        st.session_state.messages = {}
-                    st.rerun()
-    else:
-        st.sidebar.info("Create a project to start chatting.")
+    # else:
+    #     st.sidebar.info("Create a project to start chatting.")
     st.sidebar.header("Account")
     if st.sidebar.button("Logout"):
         logout_user()

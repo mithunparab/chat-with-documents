@@ -9,7 +9,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # Use the explicit path directly here too for consistency, assuming you want it on the external drive
+      - /Volumes/FLASH_128GB/Docker/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -24,10 +25,11 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "9000:9000" 
-      - "9001:9001" 
+      - "9000:9000"
+      - "9001:9001"
     volumes:
-      - minio_data:/data
+      # DIRECT BIND MOUNT
+      - /Volumes/FLASH_128GB/Docker/minio:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -38,6 +40,16 @@ services:
     image: redis:7-alpine
     container_name: chat_with_docs_redis
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: chat_with_docs_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      # --- HARDCODED EXTERNAL PATH FOR OLLAMA ---
+      - /Volumes/FLASH_128GB/Docker/llms/.ollama:/root/.ollama
+    tty: true
+
   api:
     build:
       context: .
@@ -47,8 +59,8 @@ services:
       - "8000:8000"
     volumes:
       - ./app:/app/app
-      - chroma_data:/app/chroma_data
-
+      # DIRECT BIND MOUNT for ChromaDB
+      - /Volumes/FLASH_128GB/Docker/chroma:/app/chroma_data
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - .env
@@ -57,10 +69,13 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      redis: 
+      redis:
+        condition: service_started
+      ollama:
         condition: service_started
     environment:
       - POSTGRES_SERVER=postgres
+      - OLLAMA_BASE_URL=http://ollama:11434
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -76,14 +91,17 @@ services:
     command: celery -A app.tasks.celery_app worker --loglevel=info
     volumes:
       - ./app:/app/app
-      - chroma_data:/app/chroma_data
+      # DIRECT BIND MOUNT for ChromaDB
+      - /Volumes/FLASH_128GB/Docker/chroma:/app/chroma_data
     env_file:
       - .env
     environment:
       - POSTGRES_SERVER=postgres
+      - OLLAMA_BASE_URL=http://ollama:11434
     depends_on:
       - api
       - redis
+      - ollama
 
   frontend:
     build:
@@ -92,7 +110,7 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./frontend:/app 
+      - ./frontend:/app
     env_file:
       - .env
     environment:
@@ -101,7 +119,9 @@ services:
       api:
         condition: service_healthy
 
-volumes:
-  postgres_data:
-  minio_data:
-  chroma_data:
+# REMOVE THIS TOP-LEVEL VOLUMES BLOCK ENTIRELY
+# volumes:
+#   postgres_data:
+#   minio_data:
+#   chroma_data:
+#   ollama_data:
