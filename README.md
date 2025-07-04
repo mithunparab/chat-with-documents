@@ -71,10 +71,10 @@ echo "🔄 Reboot or log out/in for group changes to apply"
 
 ### Clone the repository:
 
-    ```bash
+  ```bash
     git clone https://github.com/mithunparab/chat-with-documents.git
     cd chat-with-documents
-    ```
+   ```
 
 ### Configuration and Execution
 
