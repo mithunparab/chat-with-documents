@@ -43,11 +43,11 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: chat_with_docs_ollama
+    volumes:
+      - /Volumes/FLASH_128GB/Docker/llms/.ollama:/root/.ollama
     ports:
       - "11434:11434"
-    volumes:
-      # --- HARDCODED EXTERNAL PATH FOR OLLAMA ---
-      - /Volumes/FLASH_128GB/Docker/llms/.ollama:/root/.ollama
+    restart: always
     tty: true
 
   api:
@@ -118,10 +118,3 @@ services:
     depends_on:
       api:
         condition: service_healthy
-
-# REMOVE THIS TOP-LEVEL VOLUMES BLOCK ENTIRELY
-# volumes:
-#   postgres_data:
-#   minio_data:
-#   chroma_data:
-#   ollama_data:
