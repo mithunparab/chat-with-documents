@@ -90,7 +90,7 @@ services:
       context: ./frontend
     container_name: chat_with_docs_frontend
     ports:
-      - "8501:8501"
+      - "80:8501"
     volumes:
       - ./frontend:/app 
     env_file:

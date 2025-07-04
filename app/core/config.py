@@ -1,19 +1,12 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import validator, Field
+from pydantic import validator
 from typing import Optional
 
 class Settings(BaseSettings):
-    """
-    Application configuration settings loaded from environment variables.
-    """
-    # --- Pydantic Model Config ---
-    # This replaces the old `class Config:` and is the modern Pydantic v2 way.
-    # It also tells Pydantic that it's okay to have extra variables in the .env file
-    # that are not defined as fields in this class (like POSTGRES_USER).
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding='utf-8',
-        extra='ignore'  # <-- This is the key change! It tells Pydantic to ignore extra fields.
+        extra='ignore'
     )
 
     # --- API Keys ---
@@ -34,7 +27,7 @@ class Settings(BaseSettings):
     POSTGRES_PORT: int = 5432
     DATABASE_URL: Optional[str] = None
 
-    @validator("DATABASE_URL", pre=True, always=True) # Use always=True for Pydantic v2
+    @validator("DATABASE_URL", pre=True, always=True)
     def assemble_db_connection(cls, v: Optional[str], values: dict) -> str:
         if isinstance(v, str):
             return v
@@ -43,13 +36,13 @@ class Settings(BaseSettings):
             f"@{values.get('POSTGRES_SERVER')}:{values.get('POSTGRES_PORT')}/{values.get('POSTGRES_DB')}"
         )
 
-
-    # --- MinIO/S3 Settings ---
-    MINIO_SERVER_URL: str
-    MINIO_ACCESS_KEY: str # Corresponds to MINIO_ROOT_USER
-    MINIO_SECRET_KEY: str # Corresponds to MINIO_ROOT_PASSWORD
-    MINIO_BUCKET_NAME: str = "documents"
-
+    # --- AWS S3 Settings ---
+    S3_BUCKET_NAME: str
+    AWS_REGION: str
+    # These are optional because we will use an IAM role on EC2
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    
     # --- JWT/Authentication Settings ---
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
@@ -59,8 +52,6 @@ class Settings(BaseSettings):
     CHROMA_PATH: str = "/app/chroma_data"
     
     # --- Celery ---
-    CELERY_BROKER_URL: str
+    CELERY_BROKER_URL: str = "redis://redis:6379/0"
 
-
-# Create the single settings instance to be used throughout the app
 settings: Settings = Settings()

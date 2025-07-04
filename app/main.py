@@ -12,7 +12,7 @@ from typing import AsyncGenerator
 
 from app.api.v1 import auth, projects, documents, chat
 from app.db.database import init_db
-from app.services.storage_service import create_minio_bucket_if_not_exists
+from app.services.storage_service import create_s3_bucket_if_not_exists
 
 import logging
 from app.core.logging_config import setup_logging
@@ -20,7 +20,6 @@ from app.core.logging_config import setup_logging
 # Call setup function at the top level
 setup_logging()
 logger = logging.getLogger(__name__)
-
 
 
 setup_logging()
@@ -34,7 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Application startup: Initializing...")
     # RESTORE THE init_db() CALL
     init_db()
-    create_minio_bucket_if_not_exists()
+    create_s3_bucket_if_not_exists()
     logger.info("Application startup complete.")
     yield
     logger.info("Application shutdown.")
