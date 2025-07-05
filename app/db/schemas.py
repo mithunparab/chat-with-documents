@@ -1,5 +1,5 @@
 import uuid
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from datetime import datetime
 from typing import List, Optional
 
@@ -11,14 +11,13 @@ class UserBase(BaseModel):
     Base model for a user.
     """
     username: str
+    email: EmailStr
 
 class ProjectBase(BaseModel):
     """
     Base model for a project.
     """
     name: str = Field(..., min_length=1, max_length=100)
-    llm_provider: Optional[str] = "groq"
-    llm_model_name: Optional[str] = None
 
 class DocumentBase(BaseModel):
     """
@@ -84,8 +83,6 @@ class Project(ProjectBase):
     id: uuid.UUID
     owner_id: uuid.UUID
     documents: List[Document] = []
-    llm_provider: str
-    llm_model_name: Optional[str] = None
 
     class Config:
         from_attributes = True
