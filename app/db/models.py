@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, ForeignKey, DateTime, Text, Enum as SAEnum, UniqueConstraint
+from sqlalchemy import Column, String, ForeignKey, DateTime, Text, UniqueConstraint, Enum as SAEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
@@ -14,16 +14,26 @@ class User(Base):
     """
     __tablename__ = "users"
     id: uuid.UUID = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
     # For local auth, this is username. For Google, this is the email.
     username: str = Column(String, unique=True, index=True, nullable=False)
     email: str = Column(String, unique=True, index=True, nullable=True)
     full_name: str = Column(String, nullable=True)
+
+    # --- NEW COLUMN ---
+    # Stores the unique ID from the OAuth provider (e.g., Google's 'sub' field)
+    social_id: str = Column(String, nullable=True, index=True)
+
     provider: str = Column(String, nullable=False, default="local") # 'local' or 'google'
     # Password can be null for users who signed up via OAuth
     hashed_password: str = Column(String, nullable=True)
+
     projects = relationship("Project", back_populates="owner", cascade="all, delete-orphan")
     
+    # This constraint now works because the 'social_id' column exists.
     __table_args__ = (UniqueConstraint('provider', 'social_id', name='_provider_social_id_uc'),)
+
+# ... (rest of the file remains the same)
 
 
 class Project(Base):

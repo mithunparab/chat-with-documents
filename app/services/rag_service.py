@@ -5,11 +5,14 @@ import redis
 from typing import List, Tuple, Dict, Any, Optional
 import httpx
 import chromadb
+import io
+from docx import Document as DocxDocument
+from bs4 import BeautifulSoup
 from langchain_community.document_loaders import (
-    PyPDFLoader, UnstructuredURLLoader, UnstructuredWordDocumentLoader,
-    UnstructuredMarkdownLoader, TextLoader
+    PyPDFLoader, TextLoader # We only need these two now
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.schema import Document as LangchainDocument
 from langchain.schema import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.llms import Ollama # If using older langchain
@@ -80,28 +83,70 @@ class RAGService:
             return UnstructuredWordDocumentLoader(file_path)
 
 
-    def process_document(self, storage_key: str, file_type: str, file_name: str, document_id: str, url: Optional[str] = None) -> None:
-        # ... (This method remains unchanged)
-        logger.info(f"Processing document_id: {document_id} for project {self.project.name}")
-        if url:
-            loader = self._get_loader(None, file_type, url=url)
-            docs: List[Document] = loader.load()
+    def _load_docs_from_file_obj(self, file_obj, file_type: str, file_name: str) -> list[LangchainDocument]:
+        """A new helper function to load docs from in-memory file objects."""
+        if file_type == "application/pdf":
+            # PyPDFLoader needs a file path, so we write to a temp file
+            with tempfile.NamedTemporaryFile(delete=True, suffix=".pdf") as tmp:
+                tmp.write(file_obj.read())
+                tmp.seek(0)
+                loader = PyPDFLoader(tmp.name)
+                return loader.load()
+        elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            doc = DocxDocument(file_obj)
+            full_text = "\n".join([para.text for para in doc.paragraphs])
+            return [LangchainDocument(page_content=full_text, metadata={"source": file_name})]
+        elif file_type.startswith("text/"):
+            content = file_obj.read().decode('utf-8', errors='ignore')
+            return [LangchainDocument(page_content=content, metadata={"source": file_name})]
         else:
-            with tempfile.NamedTemporaryFile(delete=True, suffix=f"_{file_name}") as tmp_file:
-                storage_service.download_file(storage_key, tmp_file.name)
-                loader = self._get_loader(tmp_file.name, file_type)
-                docs: List[Document] = loader.load()
-        
+            logger.warning(f"Unsupported file type '{file_type}' for {file_name}. Skipping.")
+            return []
+
+    def process_document(
+        self,
+        storage_key: str,
+        file_type: str,
+        file_name: str,
+        document_id: str,
+        url: Optional[str] = None
+    ) -> None:
+        logger.info(f"Processing document_id: {document_id} for project {self.project.name}")
+        docs: list[LangchainDocument] = []
+
+        if url:
+            try:
+                response = httpx.get(url, follow_redirects=True, timeout=20.0)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                # A simple text extraction. Can be improved.
+                page_text = soup.get_text(separator='\n', strip=True)
+                docs = [LangchainDocument(page_content=page_text, metadata={"source": url})]
+            except Exception as e:
+                logger.error(f"Failed to process URL {url}: {e}")
+                return
+        else:
+            # Download file from S3/MinIO into an in-memory buffer
+            try:
+                file_obj = io.BytesIO()
+                storage_service.s3_client.download_fileobj(storage_service.BUCKET_NAME, storage_key, file_obj)
+                file_obj.seek(0)
+                docs = self._load_docs_from_file_obj(file_obj, file_type, file_name)
+            except Exception as e:
+                logger.error(f"Failed to download or process file {storage_key}: {e}")
+                return
+
         if not docs:
-            logger.warning(f"No documents could be loaded from {file_name}. Skipping.")
+            logger.warning(f"No content could be loaded from {file_name or url}. Skipping.")
             return
 
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP
         )
-        chunks: List[Document] = text_splitter.split_documents(docs)
+        chunks: list[LangchainDocument] = text_splitter.split_documents(docs)
+
         if not chunks:
-            logger.warning(f"No text could be extracted from {file_name}. Skipping.")
+            logger.warning(f"No text could be extracted from {file_name or url}. Skipping.")
             return
 
         for chunk in chunks:

@@ -40,7 +40,6 @@ services:
     image: redis:7-alpine
     container_name: chat_with_docs_redis
 
-  # --- OLLAMA SERVICE (CPU-ONLY VERSION) ---
   ollama:
     image: ollama/ollama:latest
     container_name: chat_with_docs_ollama
@@ -51,9 +50,9 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 30s
-      timeout: 10s
+      timeout: 20s   # <-- INCREASED from 10s
       retries: 5
-      start_period: 60s # Give Ollama plenty of time to start up
+      start_period: 120s # <-- INCREASED from 60s. Give it 2 minutes to start.
 
   api:
     build:
@@ -65,10 +64,22 @@ services:
     volumes:
       - ./app:/app/app
       - chroma_data:/app/chroma_data
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # --- ADD THIS COMMAND SECTION ---
+    # This command uses a script to wait for dependencies before starting uvicorn.
+    command: >
+      sh -c "
+        echo 'Waiting for PostgreSQL...'
+        while ! nc -z postgres 5432; do sleep 1; done;
+        echo 'PostgreSQL started.'
+
+        echo 'Waiting for Ollama...'
+        while ! nc -z ollama 11434; do sleep 1; done;
+        echo 'Ollama started.'
+        
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
+      "
     env_file:
       - .env
-    # --- CORRECTED DEPENDS_ON FORMAT ---
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,16 +88,17 @@ services:
       redis: 
         condition: service_started
       ollama:
-        condition: service_healthy
+        condition: service_healthy # Keep this, it's still useful
     environment:
       - POSTGRES_SERVER=postgres
-      - OLLAMA_HOST=http://ollama:11434 # For easy access from code
+      - OLLAMA_HOST=http://ollama:11434
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 10s
+      # This check is more reliable. It just verifies if the TCP port is open.
+      test: ["CMD", "nc", "-z", "localhost", "8000"]
+      interval: 10s   # We can make this faster now
+      timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 60s # Keep this generous
 
   celery_worker:
     build:
@@ -132,3 +144,5 @@ volumes:
   minio_data:
   chroma_data:
   ollama_data: {} 
+
+  

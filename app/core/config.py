@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     # --- Google OAuth ---
     GOOGLE_CLIENT_ID: str
     GOOGLE_CLIENT_SECRET: str
+    PUBLIC_API_URL: str = "http://localhost:8000" # Add this line
     FRONTEND_URL: str = "http://localhost:8501"
+    GOOGLE_OAUTH_REDIRECT_URI: Optional[str] = None
 
     # --- RAG/LLM Settings ---
     CHUNK_SIZE: int = 1000

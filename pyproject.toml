@@ -21,39 +21,32 @@ langchain-ollama = "^0.1.0"
 langchain-chroma = "^0.1.1"
 groq = "^0.9.0"
 
-# Document Loaders
-unstructured = {extras = ["pdf", "md", "docx"], version = "^0.14.5"}
+# Document Loaders (Lighter alternatives)
 beautifulsoup4 = "^4.12.3"
 pypdf = "^4.2.0"
 python-docx = "^1.1.2"
-opencv-python-headless = "^4.9.0.80"
-pdfminer-six = "20221105"
 
-# Vector & Keyword Search
-chromadb = "0.4.24" 
-rank-bm25 = "^0.2.2"
+# Vector Search
+chromadb = "^0.5.3"
 
 # Database (Postgres)
 sqlalchemy = "^2.0.30"
 psycopg2-binary = "^2.9.9"
 
-
 # Authentication
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
-authlib = "^1.3.0"
-itsdangerous = "^2.2.0" # Required by Starlette's SessionMiddleware
+httpx-oauth = "*" # Let poetry choose the best version
 
 # Storage (S3/MinIO)
 boto3 = "^1.34.111"
 
 # For frontend/CLI interaction
 requests = "^2.32.3"
-httpx = "^0.27.0"
+# The 'httpx' dependency is now GONE from this list.
+
 celery = {extras = ["redis"], version = "^5.4.0"}
 redis = "^5.0.4"
-
-
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.main.api"

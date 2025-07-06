@@ -1,5 +1,12 @@
-# frontend/app.py
+"""
+Unified Streamlit UI for Chat with Documents
 
+This module handles the complete user experience, including:
+- User authentication via password, Google, and Apple (OAuth2).
+- Project management with a choice of LLM providers (Cloud vs. Local).
+- Document management (upload, URL, status tracking).
+- Real-time chat interaction with source citations.
+"""
 import streamlit as st
 import requests
 import pandas as pd
@@ -7,404 +14,332 @@ import json
 from typing import Dict, Any, List, Optional
 import os
 
-# --- Configuration and API Setup ---
-
+# --- Configuration ---
 st.set_page_config(
-    page_title="Chat with Documents",
+    page_title="Chat with Your Docs",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    page_icon="🤖"
 )
 
+# --- API URL Helpers ---
 def get_api_url() -> str:
-    """Returns the API URL from environment variable or defaults to localhost."""
+    """Returns the INTERNAL API URL for server-to-server calls."""
     return os.getenv("API_URL", "http://localhost:8000/api/v1")
 
+def get_public_api_url() -> str:
+    """Returns the PUBLIC API URL for browser-facing links (like OAuth)."""
+    return os.getenv("PUBLIC_API_URL", "http://localhost:8000/api/v1")
+
 API_URL = get_api_url()
-GOOGLE_LOGIN_URL = f"{API_URL}/auth/login/google"
+PUBLIC_API_URL = get_public_api_url()
 
-# --- Session State Initialization ---
 
-def init_session_state():
-    """Initializes all required keys in the session state."""
+# --- Authentication & Session Management ---
+
+def initialize_session_state():
+    """Initializes all required keys in the session state to prevent errors."""
     defaults = {
         "logged_in": False,
-        "token": None,
         "username": None,
+        "token": None,
+        "projects": [],
         "current_project_id": None,
         "current_project_name": None,
         "current_chat_id": None,
-        "messages": {},  # Stores messages per chat_id: {'chat_id': [messages]}
+        "messages": {}
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-# --- API Client Functions ---
-
-class ApiClient:
-    """A client to interact with the backend API."""
-    def _get_headers(self) -> Dict[str, str]:
-        if st.session_state.token:
-            return {"Authorization": f"Bearer {st.session_state.token}"}
-        return {}
-
-    def _handle_request(self, method: str, endpoint: str, **kwargs) -> Optional[requests.Response]:
-        url = f"{API_URL}/{endpoint}"
+def handle_oauth_token():
+    """Checks for an OAuth token in the URL params and attempts to log in."""
+    if token := st.query_params.get("token"):
+        headers = {"Authorization": f"Bearer {token}"}
         try:
-            response = requests.request(method, url, headers=self._get_headers(), **kwargs)
-            response.raise_for_status()
-            return response
-        except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code
-            try:
-                detail = e.response.json().get("detail", e.response.text)
-            except json.JSONDecodeError:
-                detail = e.response.text
-            
-            if status_code == 401:
-                st.error("Authentication failed. Please log in again.")
-                logout()
-            else:
-                st.error(f"API Error ({status_code}): {detail}")
-        except requests.exceptions.RequestException as e:
-            st.error(f"Connection Error: Could not connect to the API. {e}")
-        return None
-
-    def login(self, username, password) -> bool:
-        try:
-            response = requests.post(f"{API_URL}/auth/token", data={"username": username, "password": password})
+            response = requests.get(f"{API_URL}/auth/users/me", headers=headers)
             if response.status_code == 200:
-                token_data = response.json()
-                st.session_state.token = token_data["access_token"]
-                st.session_state.username = username
+                user_data = response.json()
+                st.session_state.token = token
+                st.session_state.username = user_data["username"]
                 st.session_state.logged_in = True
-                return True
+                st.query_params.clear()
+                st.rerun()
             else:
-                st.error(f"Login failed: {response.json().get('detail', 'Invalid credentials')}")
-        except requests.exceptions.RequestException as e:
-            st.error(f"Connection to API failed: {e}")
+                st.error("Login failed: Invalid token received from provider.")
+        except requests.RequestException as e:
+            st.error(f"Login failed: Could not connect to API to validate token. {e}")
+
+def login_user(username: str, password: str) -> bool:
+    """Authenticates with password and stores token."""
+    try:
+        response = requests.post(f"{API_URL}/auth/token", data={"username": username, "password": password})
+        if response.status_code == 200:
+            st.session_state.token = response.json()["access_token"]
+            st.session_state.username = username
+            st.session_state.logged_in = True
+            return True
+        else:
+            st.error(f"Login failed: {response.json().get('detail', 'Invalid credentials')}")
+            return False
+    except requests.RequestException as e:
+        st.error(f"Connection to API failed: {e}")
         return False
-        
-    def signup(self, username, password) -> bool:
-        try:
-            response = requests.post(f"{API_URL}/auth/signup", json={"username": username, "password": password})
-            if response.status_code == 200:
-                st.success("Signup successful! Please log in.")
-                return True
-            else:
-                st.error(f"Signup failed: {response.json().get('detail', 'Unknown error')}")
-        except requests.exceptions.RequestException as e:
-            st.error(f"Connection to API failed: {e}")
+
+def signup_user(username: str, email: str, password: str) -> bool:
+    """Registers a new user."""
+    try:
+        response = requests.post(f"{API_URL}/auth/signup", json={"username": username, "email": email, "password": password})
+        if response.status_code == 201:
+            st.success("Signup successful! Please log in.")
+            return True
+        else:
+            st.error(f"Signup failed: {response.json().get('detail', 'Unknown error')}")
+            return False
+    except requests.RequestException as e:
+        st.error(f"Connection to API failed: {e}")
         return False
 
-    def get_projects(self) -> List[Dict[str, Any]]:
-        response = self._handle_request("get", "projects/")
-        return response.json() if response else []
-
-    def create_project(self, name: str) -> Optional[Dict[str, Any]]:
-        response = self._handle_request("post", "projects/", json={"name": name})
-        return response.json() if response else None
-
-    def get_documents(self, project_id: str) -> List[Dict[str, Any]]:
-        response = self._handle_request("get", f"documents/{project_id}")
-        return response.json() if response else []
-
-    def upload_document_file(self, project_id: str, file) -> bool:
-        files = {'file': (file.name, file.getvalue(), file.type)}
-        response = self._handle_request("post", f"documents/upload/{project_id}", files=files)
-        return response is not None
-
-    def upload_document_from_url(self, project_id: str, url: str) -> bool:
-        response = self._handle_request("post", f"documents/upload_url/{project_id}", json={"url": url})
-        return response is not None
-
-    def delete_document(self, project_id: str, document_id: str) -> bool:
-        response = self._handle_request("delete", f"documents/{project_id}/{document_id}")
-        return response is not None
-
-    def get_chat_sessions(self, project_id: str) -> List[Dict[str, Any]]:
-        response = self._handle_request("get", f"chat/sessions/{project_id}")
-        return response.json() if response else []
-
-    def delete_chat_session(self, project_id: str, session_id: str) -> bool:
-        response = self._handle_request("delete", f"chat/sessions/{project_id}/{session_id}")
-        return response is not None
-
-    def send_chat_query(self, project_id: str, query: str, chat_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        payload = {"query": query, "chat_id": chat_id}
-        response = self._handle_request("post", f"chat/{project_id}", json=payload)
-        return response.json() if response else None
-
-client = ApiClient()
-
-# --- Authentication Logic ---
-
-def logout():
-    """Clears session state and reruns to show login page."""
-    keys_to_clear = list(st.session_state.keys())
-    for key in keys_to_clear:
-        del st.session_state[key]
+def logout_user():
+    """Clears session state for logout."""
+    initialize_session_state()
+    st.success("Logged out successfully.")
     st.rerun()
 
-def handle_google_auth_callback():
-    """Checks for token in URL params from Google OAuth redirect."""
-    token = st.query_params.get("token")
-    if token:
-        st.session_state.token = token
-        # For simplicity, we can't easily get the username here without another API call.
-        # We'll set a generic name or leave it to be fetched later.
-        st.session_state.username = "User" # Or make a /users/me endpoint
-        st.session_state.logged_in = True
-        st.query_params.clear() # Clean the URL
-        st.rerun()
-
 def auth_page():
-    """Renders the authentication page for login and signup."""
-    st.title("Welcome to Chat with Documents")
-    st.markdown("Log in to chat with your documents using advanced AI.")
+    """Renders the two-column authentication page."""
+    st.title("🤖 Chat with Your Docs")
+    st.markdown("Unlock insights from your documents using the power of local or cloud-based AI. **Log in or create an account to get started.**")
+    st.markdown("---")
     
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 1])
 
     with col1:
         st.subheader("Login")
         with st.form("login_form"):
-            username = st.text_input("Username (Email)")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login")
-            if submitted and client.login(username, password):
-                st.rerun()
-
-        st.markdown("---")
-        st.link_button("Sign in with Google", GOOGLE_LOGIN_URL, use_container_width=True)
+            username = st.text_input("Username", key="login_user")
+            password = st.text_input("Password", type="password", key="login_pass")
+            if st.form_submit_button("Login", use_container_width=True):
+                if login_user(username, password):
+                    st.rerun()
+        
+        st.divider()
+        st.markdown("Or sign in with a single click:")
+        
+        google_login_url = f"{PUBLIC_API_URL}/auth/login/google"
+        st.markdown(f"""<a href="{google_login_url}" target="_self" style="display: flex; align-items: center; justify-content: center; font-family: 'Roboto', sans-serif; font-weight: 500; font-size: 14px; color: #333; background-color: #ffffff; border: 1px solid #ddd; border-radius: 4px; padding: 10px 24px; text-decoration: none; width: 100%; margin-top: 10px; box-shadow: 0 1px 2px 0 rgba(0,0,0,0.1);"><img src="https://accounts.google.com/favicon.ico" alt="Google logo" style="margin-right: 10px; width: 18px; height: 18px;">Sign in with Google</a>""", unsafe_allow_html=True)
+        
+        st.markdown(f"""<div style="display: flex; align-items: center; justify-content: center; font-family: -apple-system, 'Helvetica Neue', sans-serif; font-weight: 500; font-size: 14px; color: #888; background-color: #f0f0f0; border: 1px solid #ddd; border-radius: 4px; padding: 10px 24px; text-decoration: none; width: 100%; margin-top: 10px; cursor: not-allowed;"><svg viewBox="0 0 16 16" style="margin-right: 10px; width: 18px; height: 18px; fill: #888;" xmlns="http://www.w3.org/2000/svg"><path d="M8.614 11.535c-.422.188-.87.31-1.344.31-.598 0-1.156-.16-1.676-.478-.05-.03-.132-.075-.15-.088l-.06-.045c-1.21-.806-2.115-2.223-2.115-3.843 0-1.226.582-2.313 1.488-3.053.453-.37.97-.582 1.54-.596.536 0 1.05.203 1.5.555.03.022.09.06.11.075l.064.045c.42.315.686.825.686 1.41 0 .42-.142.795-.424 1.11-.274.308-.63.533-1.046.615.93.525 1.533 1.485 1.533 2.595 0 .57-.195 1.103-.525 1.53zM12.43 9.4c.038-1.245-.6-2.25-1.71-2.25-.9 0-1.545.69-1.92 1.17.615 1.545.42 3.195 1.845 3.195.405 0 .81-.195 1.2-.495-.12-.015-.645-.255-.495-1.62z"></path></svg>Sign in with Apple (Coming Soon)</div>""", unsafe_allow_html=True)
 
     with col2:
-        st.subheader("Sign Up")
+        st.subheader("Create an Account")
         with st.form("signup_form"):
-            new_username = st.text_input("Choose a Username (Email)")
-            new_password = st.text_input("Choose a Password", type="password")
-            submitted = st.form_submit_button("Sign Up")
-            if submitted:
-                client.signup(new_username, new_password)
+            new_username = st.text_input("Choose a Username", key="signup_user")
+            new_email = st.text_input("Your Email Address", key="signup_email")
+            new_password = st.text_input("Choose a Password", type="password", key="signup_pass")
+            if st.form_submit_button("Sign Up", use_container_width=True):
+                signup_user(new_username, new_email, new_password)
 
 
-# --- Main App UI Components ---
+# --- API Helper Functions ---
+
+def get_auth_headers() -> Dict[str, str]:
+    return {"Authorization": f"Bearer {st.session_state.token}"} if st.session_state.token else {}
+
+def api_request(method: str, endpoint: str, **kwargs) -> Optional[requests.Response]:
+    """A centralized function for making API requests."""
+    try:
+        url = f"{API_URL}/{endpoint}"
+        res = requests.request(method, url, headers=get_auth_headers(), **kwargs)
+        res.raise_for_status()
+        return res
+    except requests.exceptions.RequestException as e:
+        status = e.response.status_code if e.response is not None else "N/A"
+        try:
+            detail = e.response.json().get('detail', e.response.text)
+        except (AttributeError, json.JSONDecodeError):
+            detail = str(e)
+        st.error(f"API Error ({status}): {detail}")
+        return None
+
+# --- Main Application UI ---
 
 def project_sidebar():
-    """Renders project selection and management in the sidebar."""
-    st.sidebar.title(f"Welcome!") # Welcome, {st.session_state.username}!")
+    """Renders the project selection and creation UI in the sidebar."""
+    st.sidebar.title(f"Welcome, {st.session_state.username}!")
+    
+    projects_res = api_request("GET", "projects/")
+    st.session_state.projects = projects_res.json() if projects_res else []
+    project_names = [p['name'] for p in st.session_state.projects]
+    
     st.sidebar.header("Projects")
-
-    projects = client.get_projects()
-    if not projects:
-        st.sidebar.info("No projects yet. Create one below.")
-    else:
-        project_names = [p['name'] for p in projects]
-        # Set a default project if none is selected or the selected one is gone
-        if not st.session_state.current_project_name or st.session_state.current_project_name not in project_names:
+    
+    if project_names:
+        if st.session_state.current_project_name not in project_names:
             st.session_state.current_project_name = project_names[0]
-
-        selected_name = st.sidebar.selectbox(
-            "Select Project",
-            options=project_names,
-            index=project_names.index(st.session_state.current_project_name)
-        )
-        if selected_name != st.session_state.current_project_name:
-            st.session_state.current_project_name = selected_name
-            st.session_state.current_chat_id = None # Reset chat on project switch
+            st.session_state.current_chat_id = None
+        
+        selected_project_index = project_names.index(st.session_state.current_project_name)
+        selected_project_name = st.sidebar.selectbox("Select Project", options=project_names, index=selected_project_index)
+        
+        if selected_project_name != st.session_state.current_project_name:
+            st.session_state.current_project_name = selected_project_name
+            st.session_state.current_chat_id = None
             st.rerun()
-
-        # Update project ID based on selected name
-        project_map = {p['name']: p['id'] for p in projects}
-        st.session_state.current_project_id = project_map.get(st.session_state.current_project_name)
+            
+        current_project = next((p for p in st.session_state.projects if p['name'] == selected_project_name), {})
+        st.session_state.current_project_id = current_project.get('id')
+        provider = current_project.get('llm_provider', 'groq').upper()
+        st.sidebar.caption(f"Provider: {provider}")
+    else:
+        st.sidebar.info("Create a project to get started.")
 
     with st.sidebar.expander("Create New Project"):
         with st.form("new_project_form", clear_on_submit=True):
             new_project_name = st.text_input("Project Name")
-            if st.form_submit_button("Create"):
+            llm_provider = st.selectbox("LLM Provider", options=["groq", "ollama"], format_func=lambda x: "Groq (Cloud)" if x == "groq" else "Ollama (Local)")
+            default_model = "llama3-8b-8192" if llm_provider == "groq" else "llama3"
+            llm_model_name = st.text_input("Model Name", value=default_model)
+
+            if st.form_submit_button("Create Project"):
                 if new_project_name:
-                    if client.create_project(new_project_name):
+                    payload = {"name": new_project_name, "llm_provider": llm_provider, "llm_model_name": llm_model_name}
+                    if res := api_request("POST", "projects/", json=payload):
+                        st.session_state.current_project_name = res.json()['name']
                         st.rerun()
                 else:
                     st.warning("Project name cannot be empty.")
+    
+    st.sidebar.header("Account")
+    if st.sidebar.button("Logout", use_container_width=True):
+        logout_user()
 
 def chat_history_sidebar():
+    """Renders the chat history for the current project."""
     st.sidebar.header("Chat History")
-    project_id = st.session_state.current_project_id
-    if not project_id:
-        st.sidebar.info("Select a project to see chat history.")
-        return
-
-    if st.sidebar.button("➕ New Chat", use_container_width=True):
-        st.session_state.current_chat_id = None
-        st.rerun()
-
-    sessions = client.get_chat_sessions(project_id)
-    for session in sessions:
-        is_selected = session['id'] == st.session_state.current_chat_id
-        button_type = "primary" if is_selected else "secondary"
-        
-        col_title, col_del = st.sidebar.columns([4, 1])
-        if col_title.button(session['title'], key=f"session_{session['id']}", use_container_width=True, type=button_type):
-            st.session_state.current_chat_id = session['id']
-            st.session_state.messages[session['id']] = session['messages']
+    if st.session_state.current_project_id:
+        if st.sidebar.button("➕ New Chat", use_container_width=True):
+            st.session_state.current_chat_id = None
             st.rerun()
         
-        if col_del.button("🗑️", key=f"del_{session['id']}", use_container_width=True):
-            if client.delete_chat_session(project_id, session['id']):
-                if st.session_state.current_chat_id == session['id']:
-                    st.session_state.current_chat_id = None
-                st.rerun()
-
+        if sessions_res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}"):
+            for session in sessions_res.json():
+                if st.sidebar.button(session['title'], key=f"session_{session['id']}", use_container_width=True):
+                    st.session_state.current_chat_id = session['id']
+                    st.rerun()
+    
 def chat_pane():
     """Renders the main chat interface."""
-    project_id = st.session_state.current_project_id
-    chat_id = st.session_state.current_chat_id
-
-    st.subheader(f"Chat")
+    st.header(f"Project: {st.session_state.current_project_name}")
     
-    # Display existing messages
-    if chat_id and chat_id in st.session_state.messages:
-        for msg in st.session_state.messages[chat_id]:
+    # Load and display chat messages
+    if st.session_state.current_chat_id:
+        if 'messages' not in st.session_state or st.session_state.messages.get('chat_id') != st.session_state.current_chat_id:
+            if res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}/{st.session_state.current_chat_id}"):
+                st.session_state.messages = {'chat_id': st.session_state.current_chat_id, 'history': res.json()['messages']}
+        
+        for msg in st.session_state.messages.get('history', []):
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-                if msg["role"] == "assistant" and msg.get("sources"):
-                    sources = json.loads(msg["sources"]) if isinstance(msg["sources"], str) else msg["sources"]
-                    with st.expander("View Sources"):
-                        for i, source in enumerate(sources):
-                            st.info(f"Source {i+1}: {source.get('source', 'N/A')}")
-                            st.code(source.get('content', ''), language=None)
-    elif not chat_id:
-         st.info("Start a new chat or select a previous one from the sidebar.")
 
-    # Chat input
+    # Handle new user input
     if prompt := st.chat_input("Ask a question about your documents..."):
-        # Display user message
-        if not chat_id:
-            st.session_state.messages['new_chat'] = []
-        
-        # Add user message to state
-        current_messages = st.session_state.messages.get(chat_id or 'new_chat', [])
-        current_messages.append({"role": "user", "content": prompt})
-
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Get assistant response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                response = client.send_chat_query(project_id, prompt, chat_id)
+            message_placeholder = st.empty()
+            message_placeholder.markdown("Thinking...")
             
-            if response:
-                answer = response.get("answer", "Sorry, something went wrong.")
-                sources = response.get("sources", [])
-                st.markdown(answer)
-
-                if sources:
-                    with st.expander("View Sources"):
-                        for i, source in enumerate(sources):
-                            st.info(f"Source {i+1}: {source.get('source', 'N/A')}")
-                            st.code(source.get('content', ''), language=None)
+            payload = {"query": prompt, "chat_id": st.session_state.current_chat_id}
+            if res := api_request("POST", f"chat/{st.session_state.current_project_id}", json=payload):
+                response_data = res.json()
+                message_placeholder.markdown(response_data["answer"])
+                with st.expander("Sources"):
+                    for source in response_data["sources"]:
+                        st.info(f"Source: {source.get('source', 'N/A')}")
+                        st.text(source.get('content', ''))
                 
-                # Update state and rerun to finalize the new chat session
-                new_chat_id = response.get('chat_id')
-                if not chat_id and new_chat_id: # This was a new chat
-                    st.session_state.current_chat_id = new_chat_id
-                    st.session_state.messages[new_chat_id] = [
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": answer, "sources": json.dumps(sources)}
-                    ]
-                    if 'new_chat' in st.session_state.messages:
-                        del st.session_state.messages['new_chat']
+                # If it was a new chat, update session state and rerun
+                if not st.session_state.current_chat_id:
+                    st.session_state.current_chat_id = response_data['chat_id']
                     st.rerun()
-                elif chat_id: # Existing chat
-                    current_messages.append({"role": "assistant", "content": answer, "sources": json.dumps(sources)})
+            else:
+                message_placeholder.markdown("An error occurred while getting an answer.")
 
 def document_manager_pane():
     """Renders the document management UI."""
-    project_id = st.session_state.current_project_id
-    st.subheader("Document Management")
-    
-    # Upload controls
-    with st.expander("Add New Documents", expanded=True):
-        tab_file, tab_url = st.tabs(["Upload File", "Add from URL"])
-        with tab_file:
-            uploaded_files = st.file_uploader(
-                "Upload PDF, DOCX, TXT, MD files",
-                type=["pdf", "docx", "txt", "md"],
-                accept_multiple_files=True
-            )
-            if st.button("Upload Files"):
+    st.header(f"Manage Documents for '{st.session_state.current_project_name}'")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        with st.expander("Upload New Documents", expanded=True):
+            uploaded_files = st.file_uploader("Upload files", type=["pdf", "docx", "txt", "md"], accept_multiple_files=True)
+            if st.button("Upload Files", use_container_width=True):
                 if uploaded_files:
-                    with st.spinner("Uploading..."):
-                        for file in uploaded_files:
-                            client.upload_document_file(project_id, file)
-                    st.success("Upload tasks started. Refresh list to see status.")
+                    success_count = 0
+                    for file in uploaded_files:
+                        files = {'file': (file.name, file.getvalue(), file.type)}
+                        if api_request("POST", f"documents/upload/{st.session_state.current_project_id}", files=files):
+                            success_count += 1
+                    st.success(f"{success_count}/{len(uploaded_files)} files uploaded successfully. Processing has started.")
                     st.rerun()
+                else:
+                    st.warning("Please select at least one file to upload.")
 
-        with tab_url:
-            url = st.text_input("Enter a public URL")
-            if st.button("Add URL"):
+    with col2:
+        with st.expander("Add Document from URL", expanded=True):
+            url = st.text_input("Enter a URL")
+            if st.button("Add URL", use_container_width=True):
                 if url:
-                    with st.spinner("Processing URL..."):
-                        if client.upload_document_from_url(project_id, url):
-                            st.success("URL processing started. Refresh list to see status.")
-                            st.rerun()
-
-    # Document list
+                    if api_request("POST", f"documents/upload_url/{st.session_state.current_project_id}", json={"url": url}):
+                        st.success(f"URL added. Processing has started.")
+                        st.rerun()
+                else:
+                    st.warning("Please enter a URL.")
+    
     st.markdown("---")
     st.subheader("Project Documents")
-    if st.button("Refresh List"):
+    if st.button("Refresh Status"):
         st.rerun()
 
-    docs = client.get_documents(project_id)
-    if not docs:
-        st.info("No documents uploaded yet.")
-    else:
-        doc_data = []
-        for doc in docs:
-            status_map = {
-                "COMPLETED": "✅ Completed", "PROCESSING": "⏳ Processing",
-                "PENDING": "⚪ Pending", "FAILED": "❌ Failed"
-            }
-            doc_data.append({
-                "File Name": doc.get('file_name'),
-                "Status": status_map.get(doc.get('status', 'FAILED')),
-                "id": doc.get('id')
-            })
-        
-        for item in doc_data:
-            col1, col2, col3 = st.columns([4, 2, 1])
-            col1.write(item["File Name"])
-            col2.write(item["Status"])
-            if col3.button("🗑️", key=f"del_doc_{item['id']}"):
-                with st.spinner("Deleting..."):
-                    if client.delete_document(project_id, item['id']):
-                        st.rerun()
+    if docs_res := api_request("GET", f"documents/{st.session_state.current_project_id}"):
+        docs = docs_res.json()
+        if not docs:
+            st.info("No documents have been added to this project yet.")
+        else:
+            doc_data = []
+            for doc in docs:
+                status = doc.get('status', 'UNKNOWN').capitalize()
+                status_icon = {"Pending": "⚪", "Processing": "⏳", "Completed": "✅", "Failed": "❌"}.get(status, "❓")
+                doc_data.append({"Status": f"{status_icon} {status}", "File Name": doc.get('file_name', 'N/A'), "ID": doc.get('id')})
+            
+            df = pd.DataFrame(doc_data)
+            st.dataframe(df[['Status', 'File Name']], use_container_width=True, hide_index=True)
 
 def main_app():
     """Renders the main application interface after authentication."""
+    st.sidebar.image("https://www.onepointltd.com/wp-content/uploads/2020/03/inno2.png") # Placeholder logo
     project_sidebar()
     chat_history_sidebar()
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Logout"):
-        logout()
-
-    st.header(f"Project: {st.session_state.current_project_name or 'N/A'}")
     
-    if st.session_state.current_project_id:
-        tab1, tab2 = st.tabs(["Chat", "Document Management"])
-        with tab1:
-            chat_pane()
-        with tab2:
-            document_manager_pane()
-    else:
-        st.info("Create or select a project from the sidebar to begin.")
+    if not st.session_state.current_project_id:
+        st.info("Please create or select a project from the sidebar to begin.")
+        return
 
-# --- App Entry Point ---
+    main_area, docs_area = st.columns([2, 1])
+    with main_area:
+        chat_pane()
+    with docs_area:
+        document_manager_pane()
+
+
+# --- Main Execution Logic ---
 
 if __name__ == "__main__":
-    init_session_state()
-    handle_google_auth_callback()
+    initialize_session_state()
+    handle_oauth_token()
 
     if st.session_state.logged_in:
         main_app()
