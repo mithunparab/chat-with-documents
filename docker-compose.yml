@@ -1,3 +1,5 @@
+# docker-compose.yml
+
 services:
   postgres:
     image: postgres:15
@@ -9,8 +11,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # Use the explicit path directly here too for consistency, assuming you want it on the external drive
-      - /Volumes/FLASH_128GB/Docker/postgres:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -25,11 +26,10 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000" 
+      - "9001:9001" 
     volumes:
-      # DIRECT BIND MOUNT
-      - /Volumes/FLASH_128GB/Docker/minio:/data
+      - minio_data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -40,15 +40,20 @@ services:
     image: redis:7-alpine
     container_name: chat_with_docs_redis
 
+  # --- OLLAMA SERVICE (CPU-ONLY VERSION) ---
   ollama:
     image: ollama/ollama:latest
     container_name: chat_with_docs_ollama
     volumes:
-      - /Volumes/FLASH_128GB/Docker/llms/.ollama:/root/.ollama
+      - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
-    restart: always
-    tty: true
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s # Give Ollama plenty of time to start up
 
   api:
     build:
@@ -59,23 +64,23 @@ services:
       - "8000:8000"
     volumes:
       - ./app:/app/app
-      # DIRECT BIND MOUNT for ChromaDB
-      - /Volumes/FLASH_128GB/Docker/chroma:/app/chroma_data
+      - chroma_data:/app/chroma_data
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - .env
+    # --- CORRECTED DEPENDS_ON FORMAT ---
     depends_on:
       postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
-      redis:
+      redis: 
         condition: service_started
       ollama:
-        condition: service_started
+        condition: service_healthy
     environment:
       - POSTGRES_SERVER=postgres
-      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_HOST=http://ollama:11434 # For easy access from code
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -91,17 +96,20 @@ services:
     command: celery -A app.tasks.celery_app worker --loglevel=info
     volumes:
       - ./app:/app/app
-      # DIRECT BIND MOUNT for ChromaDB
-      - /Volumes/FLASH_128GB/Docker/chroma:/app/chroma_data
+      - chroma_data:/app/chroma_data
     env_file:
       - .env
+    # --- CORRECTED DEPENDS_ON FORMAT ---
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_healthy
     environment:
       - POSTGRES_SERVER=postgres
-      - OLLAMA_BASE_URL=http://ollama:11434
-    depends_on:
-      - api
-      - redis
-      - ollama
+      - OLLAMA_HOST=http://ollama:11434 # For easy access from code
 
   frontend:
     build:
@@ -110,7 +118,7 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./frontend:/app
+      - ./frontend:/app 
     env_file:
       - .env
     environment:
@@ -118,3 +126,9 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
+volumes:
+  postgres_data:
+  minio_data:
+  chroma_data:
+  ollama_data: {} 

@@ -2,40 +2,91 @@ import uuid
 from sqlalchemy.orm import Session
 from . import models, schemas
 from app.auth.jwt import get_password_hash
+from typing import Dict, Any
 
 def get_user(db: Session, user_id: uuid.UUID) -> models.User | None:
-    """
-    Retrieve a user by their UUID.
-    Args:
-        db (Session): SQLAlchemy session.
-        user_id (uuid.UUID): User's UUID.
-    Returns:
-        User instance or None if not found.
-    """
+    """Retrieve a user by their UUID."""
     return db.query(models.User).filter(models.User.id == user_id).first()
 
 def get_user_by_username(db: Session, username: str) -> models.User | None:
-    """
-    Retrieve a user by their username.
-    Args:
-        db (Session): SQLAlchemy session.
-        username (str): Username.
-    Returns:
-        User instance or None if not found.
-    """
+    """Retrieve a user by their username."""
     return db.query(models.User).filter(models.User.username == username).first()
+
+def get_user_by_email(db: Session, email: str) -> models.User | None:
+    """Retrieve a user by their email address."""
+    return db.query(models.User).filter(models.User.email == email).first()
+
+def get_or_create_oauth_user(db: Session, user_info: Dict[str, Any]) -> models.User:
+    """
+    Find an existing user by email or create a new one for an OAuth login.
+    If a user with the email exists but is from a different provider,
+    it can be linked (this simple implementation just returns the user).
+    """
+    email = user_info.get("email")
+    if not email:
+        raise ValueError("Email not found in user info from OAuth provider.")
+
+    # Find user by email, as it's the unique identifier for a person
+    db_user = get_user_by_email(db, email=email)
+    
+    if db_user:
+        # User exists. Update provider info if they are logging in with a new method.
+        if not db_user.provider or db_user.provider == 'local':
+            db_user.provider = user_info.get("provider")
+            db_user.social_id = user_info.get("sub") # 'sub' is the standard OIDC claim for user ID
+            db.commit()
+            db.refresh(db_user)
+        return db_user
+
+    # User does not exist, create a new one.
+    # Handle potential username collision if derived from email.
+    username = user_info.get("name", email.split('@')[0]).replace(" ", "")
+    original_username = username
+    counter = 1
+    while get_user_by_username(db, username):
+        username = f"{original_username}{counter}"
+        counter += 1
+    
+    new_user = models.User(
+        email=email,
+        username=username,
+        provider=user_info.get("provider"),
+        social_id=user_info.get("sub"),
+        hashed_password=None # No password for OAuth users
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
 
 def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     """
-    Create a new user with hashed password.
-    Args:
-        db (Session): SQLAlchemy session.
-        user (UserCreate): User creation schema.
-    Returns:
-        Created User instance.
+    Create a new user with hashed password (for local auth).
     """
     hashed_password = get_password_hash(user.password)
-    db_user = models.User(username=user.username, hashed_password=hashed_password)
+    db_user = models.User(
+        username=user.username,
+        email=user.username, # Assume username is email for local auth consistency
+        hashed_password=hashed_password,
+        provider="local"
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+# NEW FUNCTION
+def create_oauth_user(db: Session, email: str, full_name: str, provider: str) -> models.User:
+    """
+    Create a new user from OAuth provider data.
+    """
+    db_user = models.User(
+        username=email, # Use email as the unique username
+        email=email,
+        full_name=full_name,
+        provider=provider,
+        hashed_password=None # No password for OAuth users
+    )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -220,6 +271,7 @@ def delete_chat_session(db: Session, session_id: uuid.UUID) -> models.ChatSessio
 def delete_user(db: Session, user_id: uuid.UUID) -> models.User | None:
     """
     Delete a user by their UUID.
+    This will cascade and delete all related projects, documents, etc.
     Args:
         db (Session): SQLAlchemy session.
         user_id (uuid.UUID): User's UUID.

@@ -17,9 +17,9 @@ langchain = "^0.2.1"
 langchain-community = "^0.2.1"
 langchain-groq = "^0.1.5"
 langchain-google-genai = "^1.0.5"
+langchain-ollama = "^0.1.0"
 langchain-chroma = "^0.1.1"
 groq = "^0.9.0"
-ollama = "^0.2.1" 
 
 # Document Loaders
 unstructured = {extras = ["pdf", "md", "docx"], version = "^0.14.5"}
@@ -30,7 +30,7 @@ opencv-python-headless = "^4.9.0.80"
 pdfminer-six = "20221105"
 
 # Vector & Keyword Search
-chromadb = "^0.5.3"
+chromadb = "0.4.24" 
 rank-bm25 = "^0.2.2"
 
 # Database (Postgres)
@@ -41,6 +41,8 @@ psycopg2-binary = "^2.9.9"
 # Authentication
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
+authlib = "^1.3.0"
+itsdangerous = "^2.2.0" # Required by Starlette's SessionMiddleware
 
 # Storage (S3/MinIO)
 boto3 = "^1.34.111"
