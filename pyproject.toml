@@ -32,6 +32,7 @@ chromadb = "^0.5.3"
 # Database (Postgres)
 sqlalchemy = "^2.0.30"
 psycopg2-binary = "^2.9.9"
+rank-bm25 = "^0.2.2"
 
 # Authentication
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
@@ -47,6 +48,7 @@ requests = "^2.32.3"
 
 celery = {extras = ["redis"], version = "^5.4.0"}
 redis = "^5.0.4"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.main.api"
