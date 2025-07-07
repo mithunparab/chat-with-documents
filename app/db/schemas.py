@@ -5,12 +5,65 @@ from typing import List, Optional
 
 from .models import DocumentStatus
 
-# --- Base Models ---
+from pydantic import BaseModel, Field
+from typing import Optional
+import uuid
+
 class UserBase(BaseModel):
     """
-    Base model for a user.
+    Base schema for user data.
+
+    Attributes:
+        username (str): The username of the user.
     """
     username: str
+
+class UserCreate(UserBase):
+    """
+    Schema for creating a new user.
+
+    Attributes:
+        password (str): The user's password.
+        email (str): The user's email address.
+    """
+    email: str # 
+    password: str
+
+class User(UserBase):
+    """
+    Schema representing a user.
+
+    Attributes:
+        id (uuid.UUID): The unique identifier of the user.
+        username (str): The username of the user.
+        full_name (Optional[str]): The user's full name, if available (e.g., from OAuth).
+    """
+    id: uuid.UUID
+    full_name: Optional[str] = None 
+
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    """
+    Schema for authentication token.
+
+    Attributes:
+        access_token (str): The access token string.
+        token_type (str): The type of the token.
+    """
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    """
+    Schema for token data.
+
+    Attributes:
+        username (Optional[str]): The username associated with the token, if any.
+    """
+    username: Optional[str] = None
+
 
 class ProjectBase(BaseModel):
     """
@@ -27,12 +80,6 @@ class DocumentBase(BaseModel):
     file_name: str
     file_type: str
 
-# --- Creation Models (for POST/PUT requests) ---
-class UserCreate(UserBase):
-    """
-    Model for creating a user.
-    """
-    password: str
 
 class ProjectCreate(ProjectBase):
     """
@@ -55,16 +102,6 @@ class ChatMessageCreate(BaseModel):
     role: str
     content: str
     sources: Optional[str] = None
-
-# --- Read Models (for GET responses) ---
-class User(UserBase):
-    """
-    Model representing a user (read model).
-    """
-    id: uuid.UUID
-
-    class Config:
-        from_attributes = True
 
 class Document(DocumentBase):
     """
