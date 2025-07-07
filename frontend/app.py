@@ -34,6 +34,21 @@ def get_public_api_url() -> str:
 API_URL = get_api_url()
 PUBLIC_API_URL = get_public_api_url()
 
+# --- Model Selection Options ---
+MODEL_OPTIONS = {
+    "groq": {
+        "Llama 3 8B": "llama3-8b-8192",
+        "Llama 3 70B": "llama3-70b-8192",
+        "Mixtral 8x7B": "mixtral-8x7b-32768",
+        "Gemma 7B": "gemma-7b-it",
+    },
+    "ollama": {
+        "Llama 3": "llama3",
+        "Gemma": "gemma",
+        "Phi-3": "phi3",
+        "Mistral": "mistral",
+    }
+}
 
 # --- Authentication & Session Management ---
 
@@ -41,7 +56,7 @@ def initialize_session_state():
     """Initializes all required keys in the session state to prevent errors."""
     defaults = {
         "logged_in": False,
-        "username": None,
+        "username": "Guest",
         "token": None,
         "projects": [],
         "current_project_id": None,
@@ -55,21 +70,25 @@ def initialize_session_state():
 
 def handle_oauth_token():
     """Checks for an OAuth token in the URL params and attempts to log in."""
-    if token := st.query_params.get("token"):
+    if "token" in st.query_params:
+        token = st.query_params["token"]
         headers = {"Authorization": f"Bearer {token}"}
         try:
             response = requests.get(f"{API_URL}/auth/users/me", headers=headers)
             if response.status_code == 200:
                 user_data = response.json()
                 st.session_state.token = token
-                st.session_state.username = user_data["username"]
+                # **FIX**: Use full name if available, otherwise fallback to username
+                st.session_state.username = user_data.get("full_name") or user_data.get("username", "User")
                 st.session_state.logged_in = True
                 st.query_params.clear()
                 st.rerun()
             else:
                 st.error("Login failed: Invalid token received from provider.")
+                st.query_params.clear()
         except requests.RequestException as e:
             st.error(f"Login failed: Could not connect to API to validate token. {e}")
+            st.query_params.clear()
 
 def login_user(username: str, password: str) -> bool:
     """Authenticates with password and stores token."""
@@ -77,7 +96,7 @@ def login_user(username: str, password: str) -> bool:
         response = requests.post(f"{API_URL}/auth/token", data={"username": username, "password": password})
         if response.status_code == 200:
             st.session_state.token = response.json()["access_token"]
-            st.session_state.username = username
+            st.session_state.username = username # For local login, username is the display name
             st.session_state.logged_in = True
             return True
         else:
@@ -90,7 +109,9 @@ def login_user(username: str, password: str) -> bool:
 def signup_user(username: str, email: str, password: str) -> bool:
     """Registers a new user."""
     try:
-        response = requests.post(f"{API_URL}/auth/signup", json={"username": username, "email": email, "password": password})
+        # **FIX**: Ensure the payload matches the backend schema (UserCreate requires email)
+        payload = {"username": username, "email": email, "password": password}
+        response = requests.post(f"{API_URL}/auth/signup", json=payload)
         if response.status_code == 201:
             st.success("Signup successful! Please log in.")
             return True
@@ -102,13 +123,21 @@ def signup_user(username: str, email: str, password: str) -> bool:
         return False
 
 def logout_user():
-    """Clears session state for logout."""
+    """Clears session state for logout and flags a message to be shown."""
+    # **FIX**: Reset the entire session state to its initial default values
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
     initialize_session_state()
-    st.success("Logged out successfully.")
+    st.query_params.clear()
+    st.query_params["logout"] = "true" # Flag to show logout message on next run
     st.rerun()
 
 def auth_page():
     """Renders the two-column authentication page."""
+    if "logout" in st.query_params:
+        st.success("You have been logged out successfully.")
+        st.query_params.clear()
+
     st.title("🤖 Chat with Your Docs")
     st.markdown("Unlock insights from your documents using the power of local or cloud-based AI. **Log in or create an account to get started.**")
     st.markdown("---")
@@ -128,9 +157,9 @@ def auth_page():
         st.markdown("Or sign in with a single click:")
         
         google_login_url = f"{PUBLIC_API_URL}/auth/login/google"
-        st.markdown(f"""<a href="{google_login_url}" target="_top" style="display: flex; align-items: center; justify-content: center; font-family: 'Roboto', sans-serif; font-weight: 500; font-size: 14px; color: #333; background-color: #ffffff; border: 1px solid #ddd; border-radius: 4px; padding: 10px 24px; text-decoration: none; width: 100%; margin-top: 10px; box-shadow: 0 1px 2px 0 rgba(0,0,0,0.1);"><img src="https://accounts.google.com/favicon.ico" alt="Google logo" style="margin-right: 10px; width: 18px; height: 18px;">Sign in with Google</a>""", unsafe_allow_html=True)
-        
-        st.markdown(f"""<div style="display: flex; align-items: center; justify-content: center; font-family: -apple-system, 'Helvetica Neue', sans-serif; font-weight: 500; font-size: 14px; color: #888; background-color: #f0f0f0; border: 1px solid #ddd; border-radius: 4px; padding: 10px 24px; text-decoration: none; width: 100%; margin-top: 10px; cursor: not-allowed;"><svg viewBox="0 0 16 16" style="margin-right: 10px; width: 18px; height: 18px; fill: #888;" xmlns="http://www.w3.org/2000/svg"><path d="M8.614 11.535c-.422.188-.87.31-1.344.31-.598 0-1.156-.16-1.676-.478-.05-.03-.132-.075-.15-.088l-.06-.045c-1.21-.806-2.115-2.223-2.115-3.843 0-1.226.582-2.313 1.488-3.053.453-.37.97-.582 1.54-.596.536 0 1.05.203 1.5.555.03.022.09.06.11.075l.064.045c.42.315.686.825.686 1.41 0 .42-.142.795-.424 1.11-.274.308-.63.533-1.046.615.93.525 1.533 1.485 1.533 2.595 0 .57-.195 1.103-.525 1.53zM12.43 9.4c.038-1.245-.6-2.25-1.71-2.25-.9 0-1.545.69-1.92 1.17.615 1.545.42 3.195 1.845 3.195.405 0 .81-.195 1.2-.495-.12-.015-.645-.255-.495-1.62z"></path></svg>Sign in with Apple (Coming Soon)</div>""", unsafe_allow_html=True)
+        st.link_button("Sign in with Google", google_login_url, use_container_width=True)
+        st.button("Sign in with Apple (Coming Soon)", use_container_width=True, disabled=True)
+
 
     with col2:
         st.subheader("Create an Account")
@@ -155,12 +184,15 @@ def api_request(method: str, endpoint: str, **kwargs) -> Optional[requests.Respo
         res.raise_for_status()
         return res
     except requests.exceptions.RequestException as e:
-        status = e.response.status_code if e.response is not None else "N/A"
-        try:
-            detail = e.response.json().get('detail', e.response.text)
-        except (AttributeError, json.JSONDecodeError):
-            detail = str(e)
-        st.error(f"API Error ({status}): {detail}")
+        if e.response is not None:
+            status = e.response.status_code
+            try:
+                detail = e.response.json().get('detail', e.response.text)
+            except (AttributeError, json.JSONDecodeError):
+                detail = str(e)
+            st.error(f"API Error ({status}): {detail}")
+        else:
+            st.error(f"API Connection Error: {e}")
         return None
 
 # --- Main Application UI ---
@@ -191,19 +223,30 @@ def project_sidebar():
         current_project = next((p for p in st.session_state.projects if p['name'] == selected_project_name), {})
         st.session_state.current_project_id = current_project.get('id')
         provider = current_project.get('llm_provider', 'groq').upper()
-        st.sidebar.caption(f"Provider: {provider}")
+        model_name = current_project.get('llm_model_name', 'default')
+        st.sidebar.caption(f"Provider: {provider} | Model: {model_name}")
     else:
         st.sidebar.info("Create a project to get started.")
 
     with st.sidebar.expander("Create New Project"):
         with st.form("new_project_form", clear_on_submit=True):
             new_project_name = st.text_input("Project Name")
-            llm_provider = st.selectbox("LLM Provider", options=["groq", "ollama"], format_func=lambda x: "Groq (Cloud)" if x == "groq" else "Ollama (Local)")
-            default_model = "llama3-8b-8192" if llm_provider == "groq" else "llama3"
-            llm_model_name = st.text_input("Model Name", value=default_model)
+            
+            # **FIX**: Dynamic model selection
+            llm_provider = st.selectbox(
+                "LLM Provider", 
+                options=list(MODEL_OPTIONS.keys()), 
+                format_func=lambda x: "Groq (Cloud)" if x == "groq" else "Ollama (Local)"
+            )
+            
+            provider_models = MODEL_OPTIONS.get(llm_provider, {})
+            model_display_names = list(provider_models.keys())
+            
+            selected_model_display_name = st.selectbox("Select Model", options=model_display_names)
+            llm_model_name = provider_models.get(selected_model_display_name)
 
             if st.form_submit_button("Create Project"):
-                if new_project_name:
+                if new_project_name and llm_model_name:
                     payload = {"name": new_project_name, "llm_provider": llm_provider, "llm_model_name": llm_model_name}
                     if res := api_request("POST", "projects/", json=payload):
                         st.session_state.current_project_name = res.json()['name']
@@ -211,7 +254,7 @@ def project_sidebar():
                 else:
                     st.warning("Project name cannot be empty.")
     
-    st.sidebar.header("Account")
+    st.sidebar.header("Profile")
     if st.sidebar.button("Logout", use_container_width=True):
         logout_user()
 
@@ -221,6 +264,8 @@ def chat_history_sidebar():
     if st.session_state.current_project_id:
         if st.sidebar.button("➕ New Chat", use_container_width=True):
             st.session_state.current_chat_id = None
+            if 'messages' in st.session_state:
+                st.session_state.messages = {}
             st.rerun()
         
         if sessions_res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}"):
@@ -233,7 +278,6 @@ def chat_pane():
     """Renders the main chat interface."""
     st.header(f"Project: {st.session_state.current_project_name}")
     
-    # Load and display chat messages
     if st.session_state.current_chat_id:
         if 'messages' not in st.session_state or st.session_state.messages.get('chat_id') != st.session_state.current_chat_id:
             if res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}/{st.session_state.current_chat_id}"):
@@ -242,31 +286,40 @@ def chat_pane():
         for msg in st.session_state.messages.get('history', []):
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+    else:
+        if 'history' in st.session_state.get('messages', {}):
+            st.session_state.messages['history'] = []
 
-    # Handle new user input
     if prompt := st.chat_input("Ask a question about your documents..."):
+        if 'history' not in st.session_state.get('messages', {}):
+            st.session_state.messages['history'] = []
+        st.session_state.messages['history'].append({"role": "user", "content": prompt})
+
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            message_placeholder.markdown("Thinking...")
-            
-            payload = {"query": prompt, "chat_id": st.session_state.current_chat_id}
-            if res := api_request("POST", f"chat/{st.session_state.current_project_id}", json=payload):
+            # **FIX**: Better user feedback during wait time
+            with st.spinner("🔍 Searching documents and formulating a response... This may take a moment."):
+                payload = {"query": prompt, "chat_id": st.session_state.current_chat_id}
+                res = api_request("POST", f"chat/{st.session_state.current_project_id}", json=payload)
+
+            if res:
                 response_data = res.json()
-                message_placeholder.markdown(response_data["answer"])
+                st.markdown(response_data["answer"])
+                st.session_state.messages['history'].append({"role": "assistant", "content": response_data["answer"]})
+                
                 with st.expander("Sources"):
                     for source in response_data["sources"]:
                         st.info(f"Source: {source.get('source', 'N/A')}")
                         st.text(source.get('content', ''))
                 
-                # If it was a new chat, update session state and rerun
                 if not st.session_state.current_chat_id:
                     st.session_state.current_chat_id = response_data['chat_id']
                     st.rerun()
             else:
-                message_placeholder.markdown("An error occurred while getting an answer.")
+                st.error("An error occurred while getting an answer.")
+                st.session_state.messages['history'].pop()
 
 def document_manager_pane():
     """Renders the document management UI."""
@@ -283,7 +336,7 @@ def document_manager_pane():
                         files = {'file': (file.name, file.getvalue(), file.type)}
                         if api_request("POST", f"documents/upload/{st.session_state.current_project_id}", files=files):
                             success_count += 1
-                    st.success(f"{success_count}/{len(uploaded_files)} files uploaded successfully. Processing has started.")
+                    st.success(f"{success_count}/{len(uploaded_files)} files uploaded. Processing has started in the background.")
                     st.rerun()
                 else:
                     st.warning("Please select at least one file to upload.")
@@ -294,7 +347,7 @@ def document_manager_pane():
             if st.button("Add URL", use_container_width=True):
                 if url:
                     if api_request("POST", f"documents/upload_url/{st.session_state.current_project_id}", json={"url": url}):
-                        st.success(f"URL added. Processing has started.")
+                        st.success(f"URL added. Processing has started in the background.")
                         st.rerun()
                 else:
                     st.warning("Please enter a URL.")
@@ -311,8 +364,8 @@ def document_manager_pane():
         else:
             doc_data = []
             for doc in docs:
-                status = doc.get('status', 'UNKNOWN').capitalize()
-                status_icon = {"Pending": "⚪", "Processing": "⏳", "Completed": "✅", "Failed": "❌"}.get(status, "❓")
+                status = doc.get('status', 'UNKNOWN')
+                status_icon = {"PENDING": "⚪️", "PROCESSING": "⏳", "COMPLETED": "✅", "FAILED": "❌"}.get(status, "❓")
                 doc_data.append({"Status": f"{status_icon} {status}", "File Name": doc.get('file_name', 'N/A'), "ID": doc.get('id')})
             
             df = pd.DataFrame(doc_data)

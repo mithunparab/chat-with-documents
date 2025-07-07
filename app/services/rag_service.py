@@ -8,19 +8,14 @@ import chromadb
 import io
 from docx import Document as DocxDocument
 from bs4 import BeautifulSoup
-from langchain_community.document_loaders import (
-    PyPDFLoader, TextLoader # We only need these two now
-)
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document as LangchainDocument
-from langchain.schema import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.llms import Ollama # If using older langchain
-from langchain_community.chat_models import ChatOllama # More common now
+from langchain_community.chat_models import ChatOllama
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
-from groq import Groq as GroqClient
 from langchain.prompts import ChatPromptTemplate
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from chromadb.config import Settings as ChromaSettings
@@ -33,23 +28,69 @@ import logging
 logger = logging.getLogger(__name__)
 
 class RAGService:
+
+    def _ensure_ollama_model_is_available(self, model_name: str) -> None:
+        """
+        Checks if a model is available in the running Ollama service and pulls it if not.
+        """
+        if not settings.OLLAMA_HOST:
+            return
+        try:
+            client = httpx.Client(base_url=settings.OLLAMA_HOST, timeout=30.0)
+            response = client.get("/api/tags")
+            response.raise_for_status()
+            models = response.json().get("models", [])
+            # Ollama model names can be e.g. "llama3:latest". We check just the base name.
+            model_exists = any(m['name'].split(':')[0] == model_name.split(':')[0] for m in models)
+
+            if model_exists:
+                logger.info(f"Ollama model '{model_name}' is already available.")
+                return
+
+            logger.info(f"Ollama model '{model_name}' not found. Pulling it now. This may take a while and the first request might time out...")
+            # This is a blocking call that can take a long time. Set a long timeout.
+            pull_response = client.post("/api/pull", json={"name": model_name, "stream": False}, timeout=None)
+            pull_response.raise_for_status()
+            
+            status_data = pull_response.json()
+            if "error" in status_data:
+                logger.error(f"Failed to pull Ollama model '{model_name}': {status_data['error']}")
+                raise Exception(f"Failed to pull Ollama model: {status_data['error']}")
+            
+            logger.info(f"Successfully pulled Ollama model '{model_name}'.")
+
+        except httpx.RequestError as e:
+            logger.error(f"Error communicating with Ollama at {settings.OLLAMA_HOST}: {e}. Please ensure Ollama is running and accessible.")
+            raise ConnectionError(f"Could not connect to Ollama service at {settings.OLLAMA_HOST}.")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while ensuring Ollama model '{model_name}' is available: {e}", exc_info=True)
+            raise
+
     def __init__(self, user: User, project: Project) -> None:
         self.user: User = user
         self.project: Project = project
         self.collection_name: str = f"proj_{str(project.id).replace('-', '')}"
-        if settings.OLLAMA_HOST:
-            # Use Ollama for both LLM and Embeddings
-            logger.info(f"Using Ollama provider at {settings.OLLAMA_HOST} with model {settings.OLLAMA_MODEL}")
-            self.llm = ChatOllama(base_url=settings.OLLAMA_HOST, model=settings.OLLAMA_MODEL)
-            # Note: You can use a different model for embeddings if you want
-            self.embedding_function = OllamaEmbeddings(base_url=settings.OLLAMA_HOST, model=settings.OLLAMA_MODEL)
-        else:
-            # Fallback to Google and Groq if Ollama is not configured
-            logger.info("Using Google and Groq providers.")
+
+        # Determine which LLM provider to use based on the project settings
+        if self.project.llm_provider == "ollama" and settings.OLLAMA_HOST:
+            model_name = self.project.llm_model_name or settings.OLLAMA_MODEL
+            logger.info(f"Using Ollama provider at {settings.OLLAMA_HOST} with model '{model_name}' for project '{self.project.name}'")
+            self._ensure_ollama_model_is_available(model_name)
+            self.llm = ChatOllama(base_url=settings.OLLAMA_HOST, model=model_name)
+            # You can use a different model for embeddings if desired. For simplicity, we use the same one.
+            self.embedding_function = OllamaEmbeddings(base_url=settings.OLLAMA_HOST, model=model_name)
+        
+        else: # Default to Groq if the provider is not 'ollama' or if Ollama is not configured
+            if self.project.llm_provider != 'groq':
+                logger.warning(f"LLM provider '{self.project.llm_provider}' is not 'ollama' or Ollama is not configured. Defaulting to 'groq'.")
+            
+            model_name = self.project.llm_model_name or settings.LLM_MODEL_NAME
+            logger.info(f"Using Groq provider with model '{model_name}' for project '{self.project.name}'")
             self.embedding_function = GoogleGenerativeAIEmbeddings(model=settings.EMBEDDING_MODEL_NAME)
-            http_client = httpx.Client(proxies=None)
-            root_groq_client = GroqClient(api_key=settings.GROQ_API_KEY, http_client=http_client)
-            self.llm = ChatGroq(model=settings.LLM_MODEL_NAME, client=root_groq_client.chat.completions)
+            self.llm = ChatGroq(
+                groq_api_key=settings.GROQ_API_KEY,
+                model_name=model_name
+            )
 
         try:
             self.redis_client: Optional[redis.Redis] = redis.from_url(settings.CELERY_BROKER_URL)
@@ -65,23 +106,6 @@ class RAGService:
             collection_name=self.collection_name,
             embedding_function=self.embedding_function,
         )
-
-    def _get_loader(self, file_path: Optional[str], file_type: str, url: Optional[str] = None) -> Any:
-        # ... (This method remains unchanged)
-        if url:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            return UnstructuredURLLoader(urls=[url], headers=headers)
-        if file_type == "application/pdf":
-            return PyPDFLoader(file_path)
-        elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            return UnstructuredWordDocumentLoader(file_path)
-        elif file_type == "text/markdown":
-            return UnstructuredMarkdownLoader(file_path)
-        elif file_type.startswith("text/"):
-            return TextLoader(file_path)
-        else: # Fallback for other document types unstructured can handle
-            return UnstructuredWordDocumentLoader(file_path)
-
 
     def _load_docs_from_file_obj(self, file_obj, file_type: str, file_name: str) -> list[LangchainDocument]:
         """A new helper function to load docs from in-memory file objects."""
@@ -200,15 +224,10 @@ class RAGService:
         
         logger.info(f"Querying project '{self.project.name}' with: '{message}'")
 
-        # --- RETRIEVAL LOGIC (REWRITTEN FOR PERFORMANCE) ---
-        # The old method of loading all docs into memory for BM25 is removed.
-        # We now use a MultiQueryRetriever for better performance and recall.
+        # --- RETRIEVAL LOGIC (Unchanged) ---
         vector_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 7})
         
-        # Check if there are any documents in the vector store for this project
-        # A simple way is to try a dummy search. If it fails or returns nothing, we can exit.
         try:
-            # Note: A more robust check would be `self.vectorstore._collection.count() > 0`
             if not self.vectorstore._collection or self.vectorstore._collection.count() == 0:
                  return "This project has no documents processed yet. Please upload a document and wait for it to complete.", []
         except Exception:
@@ -219,12 +238,12 @@ class RAGService:
             retriever=vector_retriever, llm=self.llm
         )
 
-        final_docs: List[Document] = multi_query_retriever.invoke(message)
+        final_docs: List[LangchainDocument] = multi_query_retriever.invoke(message)
         
         if not final_docs:
             return "I couldn't find relevant information in your documents to answer the query.", []
 
-        # --- CONTEXT & PROMPT (Unchanged - Preserving your core RAG logic) ---
+        # --- CONTEXT & PROMPT (Unchanged) ---
         context_text: str = "\n\n---\n\n".join([doc.page_content for doc in final_docs])
         
         rag_prompt = ChatPromptTemplate.from_template("""
