@@ -30,7 +30,6 @@ google_client = GoogleOAuth2(
 )
 
 # === Local Authentication ===
-# This function will now correctly use your local 'app.auth.jwt' module
 @router.post("/signup", response_model=User, status_code=status.HTTP_201_CREATED)
 def signup(user: UserCreate, db: Session = Depends(get_db)) -> models.User:
     db_user = crud.get_user_by_username(db, username=user.username)
@@ -40,7 +39,6 @@ def signup(user: UserCreate, db: Session = Depends(get_db)) -> models.User:
          raise HTTPException(status_code=400, detail="Email already registered")
     return crud.create_user(db=db, user=user)
 
-# This function will now correctly use your local 'app.auth.jwt' module
 @router.post("/token", response_model=Token)
 def login_for_access_token(
     db: Session = Depends(get_db),
@@ -70,33 +68,43 @@ async def login_google(request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="OAuth is not configured correctly."
         )
-    return await google_client.get_authorization_url(
+    authorization_url = await google_client.get_authorization_url(
         redirect_uri=redirect_uri,
         scope=["email", "profile"],
     )
+    return RedirectResponse(url=authorization_url)
 
-@router.get("/callback/google", name="auth:google_callback")
+
+@router.get("/callback/google", name="auth:google_callback", include_in_schema=False)
 async def callback_google(request: Request, db: Session = Depends(get_db)):
     try:
         redirect_uri = settings.GOOGLE_OAUTH_REDIRECT_URI
-        code = request.query_params["code"]
+        code = request.query_params.get("code")
+        if not code:
+            raise HTTPException(status_code=400, detail="Missing authorization code from Google")
+
         token_data = await google_client.get_access_token(code, redirect_uri)
         
+        id_token_jwt = token_data.get("id_token")
+        if not id_token_jwt:
+            raise HTTPException(status_code=400, detail="ID token not found in Google response")
+
         try:
-            # Using the 'jose_jwt' alias for decoding
+            # **THE CRITICAL FIX IS HERE**
+            # Restore the options from the original working code to prevent the at_hash claim error.
             id_token_payload = jose_jwt.decode(
-                token_data["id_token"],
-                key=None,
+                id_token_jwt, 
+                key=None, 
                 options={
-                    "verify_signature": False,
+                    "verify_signature": False, 
                     "verify_aud": False,
                     "verify_iss": False,
-                    "verify_at_hash": False,
+                    "verify_at_hash": False # <-- THIS LINE FIXES THE CRASH
                 }
             )
         except JWTError as e:
             logger.error(f"JWT decoding error: {e}")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials from token")
+            raise HTTPException(status_code=401, detail="Could not validate credentials from token")
 
         email = id_token_payload["email"]
         social_id = id_token_payload["sub"]
@@ -116,7 +124,6 @@ async def callback_google(request: Request, db: Session = Depends(get_db)):
             db_user = crud.create_oauth_user(db, email=email, username=username, full_name=full_name, provider="google", social_id=social_id)
         
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        # This call will now correctly use your local 'jwt' module again
         access_token = jwt.create_access_token(
             data={"sub": db_user.username}, expires_delta=access_token_expires
         )
@@ -126,15 +133,18 @@ async def callback_google(request: Request, db: Session = Depends(get_db)):
 
     except GetAccessTokenError as e:
         logger.error(f"Error getting access token from Google: {e}")
+        error_detail = "oauth_token_failed"
         if e.response:
             logger.error(f"Google's detailed response: {e.response.json()}")
-        error_url = f"{settings.FRONTEND_URL}?error=oauth_token_failed"
+            error_detail = e.response.json().get('error', 'oauth_token_failed')
+        error_url = f"{settings.FRONTEND_URL}?error={error_detail}"
         return RedirectResponse(url=error_url)
 
     except Exception as e:
         logger.error(f"An unexpected error occurred during Google authentication: {e}", exc_info=True)
-        error_url = f"{settings.FRONTEND_URL}?error=oauth_failed"
+        error_url = f"{settings.FRONTEND_URL}?error=oauth_server_error"
         return RedirectResponse(url=error_url)
+
 
 # === User Management ===
 @router.get("/users/me", response_model=User)

@@ -17,7 +17,6 @@ from langchain_community.embeddings import OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate
-from langchain.retrievers.multi_query import MultiQueryRetriever
 from chromadb.config import Settings as ChromaSettings
 
 from app.core.config import settings
@@ -30,9 +29,6 @@ logger = logging.getLogger(__name__)
 class RAGService:
 
     def _ensure_ollama_model_is_available(self, model_name: str) -> None:
-        """
-        Checks if a model is available in the running Ollama service and pulls it if not.
-        """
         if not settings.OLLAMA_HOST:
             return
         try:
@@ -40,15 +36,13 @@ class RAGService:
             response = client.get("/api/tags")
             response.raise_for_status()
             models = response.json().get("models", [])
-            # Ollama model names can be e.g. "llama3:latest". We check just the base name.
             model_exists = any(m['name'].split(':')[0] == model_name.split(':')[0] for m in models)
 
             if model_exists:
                 logger.info(f"Ollama model '{model_name}' is already available.")
                 return
 
-            logger.info(f"Ollama model '{model_name}' not found. Pulling it now. This may take a while and the first request might time out...")
-            # This is a blocking call that can take a long time. Set a long timeout.
+            logger.info(f"Ollama model '{model_name}' not found. Pulling it now. This may take a while...")
             pull_response = client.post("/api/pull", json={"name": model_name, "stream": False}, timeout=None)
             pull_response.raise_for_status()
             
@@ -60,7 +54,7 @@ class RAGService:
             logger.info(f"Successfully pulled Ollama model '{model_name}'.")
 
         except httpx.RequestError as e:
-            logger.error(f"Error communicating with Ollama at {settings.OLLAMA_HOST}: {e}. Please ensure Ollama is running and accessible.")
+            logger.error(f"Error communicating with Ollama at {settings.OLLAMA_HOST}: {e}.")
             raise ConnectionError(f"Could not connect to Ollama service at {settings.OLLAMA_HOST}.")
         except Exception as e:
             logger.error(f"An unexpected error occurred while ensuring Ollama model '{model_name}' is available: {e}", exc_info=True)
@@ -71,16 +65,14 @@ class RAGService:
         self.project: Project = project
         self.collection_name: str = f"proj_{str(project.id).replace('-', '')}"
 
-        # Determine which LLM provider to use based on the project settings
         if self.project.llm_provider == "ollama" and settings.OLLAMA_HOST:
             model_name = self.project.llm_model_name or settings.OLLAMA_MODEL
             logger.info(f"Using Ollama provider at {settings.OLLAMA_HOST} with model '{model_name}' for project '{self.project.name}'")
             self._ensure_ollama_model_is_available(model_name)
             self.llm = ChatOllama(base_url=settings.OLLAMA_HOST, model=model_name)
-            # You can use a different model for embeddings if desired. For simplicity, we use the same one.
             self.embedding_function = OllamaEmbeddings(base_url=settings.OLLAMA_HOST, model=model_name)
         
-        else: # Default to Groq if the provider is not 'ollama' or if Ollama is not configured
+        else:
             if self.project.llm_provider != 'groq':
                 logger.warning(f"LLM provider '{self.project.llm_provider}' is not 'ollama' or Ollama is not configured. Defaulting to 'groq'.")
             
@@ -108,9 +100,7 @@ class RAGService:
         )
 
     def _load_docs_from_file_obj(self, file_obj, file_type: str, file_name: str) -> list[LangchainDocument]:
-        """A new helper function to load docs from in-memory file objects."""
         if file_type == "application/pdf":
-            # PyPDFLoader needs a file path, so we write to a temp file
             with tempfile.NamedTemporaryFile(delete=True, suffix=".pdf") as tmp:
                 tmp.write(file_obj.read())
                 tmp.seek(0)
@@ -143,14 +133,12 @@ class RAGService:
                 response = httpx.get(url, follow_redirects=True, timeout=20.0)
                 response.raise_for_status()
                 soup = BeautifulSoup(response.content, 'html.parser')
-                # A simple text extraction. Can be improved.
                 page_text = soup.get_text(separator='\n', strip=True)
                 docs = [LangchainDocument(page_content=page_text, metadata={"source": url})]
             except Exception as e:
                 logger.error(f"Failed to process URL {url}: {e}")
                 return
         else:
-            # Download file from S3/MinIO into an in-memory buffer
             try:
                 file_obj = io.BytesIO()
                 storage_service.s3_client.download_fileobj(storage_service.BUCKET_NAME, storage_key, file_obj)
@@ -182,7 +170,6 @@ class RAGService:
         self.clear_cache_for_project()
 
     def delete_document_chunks(self, document_id: str) -> None:
-        # ... (This method remains unchanged)
         logger.info(f"Deleting chunks for document_id: {document_id} from '{self.collection_name}'")
         try:
             collection = self.vectorstore._collection
@@ -197,7 +184,6 @@ class RAGService:
             logger.error(f"Error deleting chunks for document {document_id}: {e}", exc_info=True)
 
     def clear_cache_for_project(self) -> None:
-        # ... (This method remains unchanged)
         if not self.redis_client:
             return
         try:
@@ -209,7 +195,6 @@ class RAGService:
             logger.error(f"Failed to clear Redis cache for project {self.project.id}: {e}", exc_info=True)
 
     def query(self, message: str) -> Tuple[str, List[Dict[str, Any]]]:
-        # --- CACHING LOGIC (Unchanged) ---
         if self.redis_client:
             message_hash: str = hashlib.sha256(message.encode()).hexdigest()
             cache_key: str = f"rag_cache:{self.project.id}:{message_hash}"
@@ -224,26 +209,21 @@ class RAGService:
         
         logger.info(f"Querying project '{self.project.name}' with: '{message}'")
 
-        # --- RETRIEVAL LOGIC (Unchanged) ---
-        vector_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 7})
+        # **FIX**: Reverted to a faster, simpler retriever to improve performance.
+        retriever = self.vectorstore.as_retriever(search_kwargs={"k": 7})
         
         try:
             if not self.vectorstore._collection or self.vectorstore._collection.count() == 0:
                  return "This project has no documents processed yet. Please upload a document and wait for it to complete.", []
         except Exception:
             return "This project has no documents processed yet. Please upload a document and wait for it to complete.", []
-
-
-        multi_query_retriever = MultiQueryRetriever.from_llm(
-            retriever=vector_retriever, llm=self.llm
-        )
-
-        final_docs: List[LangchainDocument] = multi_query_retriever.invoke(message)
+        
+        # Use the simple retriever directly.
+        final_docs: List[LangchainDocument] = retriever.get_relevant_documents(message)
         
         if not final_docs:
             return "I couldn't find relevant information in your documents to answer the query.", []
 
-        # --- CONTEXT & PROMPT (Unchanged) ---
         context_text: str = "\n\n---\n\n".join([doc.page_content for doc in final_docs])
         
         rag_prompt = ChatPromptTemplate.from_template("""
@@ -253,7 +233,7 @@ class RAGService:
             1.  **Analyze the Context:** Carefully read the following context, which is composed of text chunks from one or more documents.
             2.  **Synthesize an Answer:** Formulate a comprehensive, well-structured answer to the user's question. Do not just copy-paste from the context. You must synthesize the information.
             3.  **Strictly Ground Your Answer:** Your entire response must be based *only* on the information available in the provided context. Do not use any outside knowledge.
-            4.  **Handle Missing Information:** If the context does not contain the necessary information to answer the question, do not invent an answer. Instead, clearly state that the provided documents do not contain the answer. However, if the context contains information that is *related* to the question, you should present that information and explain how it relates, while still noting that a direct answer is unavailable.
+            4.  **Handle Missing Information:** If the context does not contain the necessary information to answer the question, do not invent an answer. Instead, clearly state that the provided documents do not contain the answer.
             5.  **Be Conversational:** Present the answer in a clear and helpful manner.
 
             **Context:**
@@ -275,7 +255,6 @@ class RAGService:
         
         sources: List[Dict[str, Any]] = list(unique_sources.values())
         
-        # --- CACHE WRITING (Unchanged) ---
         if self.redis_client:
             try:
                 result_to_cache: Dict[str, Any] = {"answer": answer, "sources": sources}
