@@ -45,14 +45,19 @@ services:
     container_name: chat_with_docs_ollama
     volumes:
       - ollama_data:/root/.ollama
+      - ./start-ollama.sh:/start-ollama.sh
+    # ** THE CRITICAL FIX IS HERE **
+    # We override the default entrypoint to execute our script directly,
+    # instead of passing our script as an argument to the ollama program.
+    entrypoint: /start-ollama.sh
     ports:
       - "11434:11434"
     healthcheck:
       test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 30s
-      timeout: 20s   # <-- INCREASED from 10s
+      timeout: 20s
       retries: 5
-      start_period: 120s # <-- INCREASED from 60s. Give it 2 minutes to start.
+      start_period: 600s
 
   api:
     build:
@@ -64,8 +69,6 @@ services:
     volumes:
       - ./app:/app/app
       - chroma_data:/app/chroma_data
-    # --- ADD THIS COMMAND SECTION ---
-    # This command uses a script to wait for dependencies before starting uvicorn.
     command: >
       sh -c "
         echo 'Waiting for PostgreSQL...'
@@ -88,17 +91,16 @@ services:
       redis: 
         condition: service_started
       ollama:
-        condition: service_healthy # Keep this, it's still useful
+        condition: service_healthy
     environment:
       - POSTGRES_SERVER=postgres
       - OLLAMA_HOST=http://ollama:11434
     healthcheck:
-      # This check is more reliable. It just verifies if the TCP port is open.
       test: ["CMD", "nc", "-z", "localhost", "8000"]
-      interval: 10s   # We can make this faster now
+      interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 60s # Keep this generous
+      start_period: 60s
 
   celery_worker:
     build:
@@ -111,7 +113,6 @@ services:
       - chroma_data:/app/chroma_data
     env_file:
       - .env
-    # --- CORRECTED DEPENDS_ON FORMAT ---
     depends_on:
       api:
         condition: service_healthy
@@ -121,7 +122,7 @@ services:
         condition: service_healthy
     environment:
       - POSTGRES_SERVER=postgres
-      - OLLAMA_HOST=http://ollama:11434 # For easy access from code
+      - OLLAMA_HOST=http://ollama:11434
 
   frontend:
     build:
@@ -143,6 +144,4 @@ volumes:
   postgres_data:
   minio_data:
   chroma_data:
-  ollama_data: {} 
-
-  
+  ollama_data: {}
