@@ -16,49 +16,6 @@ def get_user_by_email(db: Session, email: str) -> models.User | None:
     """Retrieve a user by their email address."""
     return db.query(models.User).filter(models.User.email == email).first()
 
-def get_or_create_oauth_user(db: Session, user_info: Dict[str, Any]) -> models.User:
-    """
-    Find an existing user by email or create a new one for an OAuth login.
-    If a user with the email exists but is from a different provider,
-    it can be linked (this simple implementation just returns the user).
-    """
-    email = user_info.get("email")
-    if not email:
-        raise ValueError("Email not found in user info from OAuth provider.")
-
-    # Find user by email, as it's the unique identifier for a person
-    db_user = get_user_by_email(db, email=email)
-    
-    if db_user:
-        # User exists. Update provider info if they are logging in with a new method.
-        if not db_user.provider or db_user.provider == 'local':
-            db_user.provider = user_info.get("provider")
-            db_user.social_id = user_info.get("sub") # 'sub' is the standard OIDC claim for user ID
-            db.commit()
-            db.refresh(db_user)
-        return db_user
-
-    # User does not exist, create a new one.
-    # Handle potential username collision if derived from email.
-    username = user_info.get("name", email.split('@')[0]).replace(" ", "")
-    original_username = username
-    counter = 1
-    while get_user_by_username(db, username):
-        username = f"{original_username}{counter}"
-        counter += 1
-    
-    new_user = models.User(
-        email=email,
-        username=username,
-        provider=user_info.get("provider"),
-        social_id=user_info.get("sub"),
-        hashed_password=None # No password for OAuth users
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return new_user
-
 def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     """
     Create a new user with hashed password (for local auth).
@@ -66,7 +23,8 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     hashed_password = get_password_hash(user.password)
     db_user = models.User(
         username=user.username,
-        email=user.username, # Assume username is email for local auth consistency
+        # FIX: Use the email from the input schema
+        email=user.email,
         hashed_password=hashed_password,
         provider="local"
     )
@@ -75,23 +33,32 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     db.refresh(db_user)
     return db_user
 
-# NEW FUNCTION
-def create_oauth_user(db: Session, email: str, full_name: str, provider: str) -> models.User:
+def get_user_by_social_id(db: Session, provider: str, social_id: str) -> models.User | None:
+    """Retrieve a user by their OAuth provider and social ID."""
+    return db.query(models.User).filter(
+        models.User.provider == provider,
+        models.User.social_id == social_id
+    ).first()
+
+
+# UPDATED FUNCTION SIGNATURE
+def create_oauth_user(db: Session, email: str, username: str, full_name: str, provider: str, social_id: str) -> models.User:
     """
     Create a new user from OAuth provider data.
     """
     db_user = models.User(
-        username=email, # Use email as the unique username
+        username=username,
         email=email,
         full_name=full_name,
         provider=provider,
+        social_id=social_id, # Store the unique social ID
         hashed_password=None # No password for OAuth users
     )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     return db_user
-
+    
 def get_project(db: Session, project_id: uuid.UUID, user_id: uuid.UUID) -> models.Project | None:
     """
     Retrieve a project by its UUID and owner.
