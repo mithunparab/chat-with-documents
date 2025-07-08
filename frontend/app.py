@@ -1,8 +1,12 @@
 """
-Main Streamlit UI logic for Chat with Documents.
+Unified Streamlit UI for Chat with Documents
 
-This module handles authentication, project and document management, chat interactions,
-and the overall user interface for the document chat application.
+This module handles the complete user experience, including:
+- User authentication via password, Google, and Apple (OAuth2).
+- Project management with a choice of LLM providers (Cloud vs. Local).
+- Document management (upload, URL, status tracking with non-flickering auto-polling).
+- Real-time chat interaction with source citations.
+- Deletion of chats and documents.
 """
 import streamlit as st
 import requests
@@ -10,479 +14,355 @@ import pandas as pd
 import json
 from typing import Dict, Any, List, Optional
 import os
+import time
 
-def get_api_url() -> str:
-    """Returns the API URL from the environment variable or defaults to localhost."""
-    return os.getenv("API_URL", "http://localhost:8000/api/v1")
-
-API_URL = get_api_url()
-
+# --- Configuration ---
 st.set_page_config(
-    page_title="Chat with Documents",
+    page_title="Chat with Your Docs",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    page_icon="🤖"
 )
 
+# --- API URL Helpers ---
+def get_api_url() -> str:
+    return os.getenv("API_URL", "http://localhost:8000/api/v1")
+
+def get_public_api_url() -> str:
+    return os.getenv("PUBLIC_API_URL", "http://localhost:8000/api/v1")
+
+API_URL = get_api_url()
+PUBLIC_API_URL = get_public_api_url()
+
+# --- Model Selection Options ---
+MODEL_OPTIONS = {
+    "groq": {
+        "Llama 3 8B": "llama3-8b-8192",
+        "Llama 3 70B": "llama3-70b-8192",
+        "Mixtral 8x7B": "mixtral-8x7b-32768",
+        "Gemma 7B": "gemma-7b-it",
+    },
+    "ollama": {
+        "Llama 3": "llama3",
+        "Gemma": "gemma",
+        "Phi-3": "phi3",
+        "Mistral": "mistral",
+    }
+}
+
+# --- Authentication & Session Management ---
+
+def initialize_session_state():
+    """Initializes all required keys in the session state to prevent errors."""
+    defaults = {
+        "logged_in": False,
+        "username": "Guest",
+        "token": None,
+        "projects": [],
+        "current_project_id": None,
+        "current_project_name": None,
+        "current_chat_id": None,
+        "messages": {},
+        "new_project_provider": "groq",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+def handle_oauth_token():
+    if "token" in st.query_params:
+        token = st.query_params["token"]
+        st.query_params.clear() 
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            response = requests.get(f"{API_URL}/auth/users/me", headers=headers)
+            if response.status_code == 200:
+                user_data = response.json()
+                st.session_state.token = token
+                st.session_state.username = user_data.get("full_name") or user_data.get("username", "User")
+                st.session_state.logged_in = True
+                st.rerun()
+            else:
+                st.error("Login failed: Invalid token received from provider.")
+        except requests.RequestException as e:
+            st.error(f"Login failed: Could not connect to API to validate token. {e}")
+
 def login_user(username: str, password: str) -> bool:
-    """Authenticates the user and stores token in session state."""
     try:
         response = requests.post(f"{API_URL}/auth/token", data={"username": username, "password": password})
         if response.status_code == 200:
-            token_data = response.json()
-            st.session_state.token = token_data["access_token"]
-            st.session_state.username = username
+            token = response.json()["access_token"]
+            st.session_state.token = token
+            headers = {"Authorization": f"Bearer {token}"}
+            user_res = requests.get(f"{API_URL}/auth/users/me", headers=headers)
+            if user_res.status_code == 200:
+                user_data = user_res.json()
+                st.session_state.username = user_data.get("full_name") or user_data.get("username", "User")
+            else:
+                st.session_state.username = username
             st.session_state.logged_in = True
-            st.success("Login successful!")
             return True
         else:
-            error_detail = response.json().get('detail', 'Invalid credentials')
-            st.error(f"Login failed: {error_detail}")
+            st.error(f"Login failed: {response.json().get('detail', 'Invalid credentials')}")
             return False
-    except requests.exceptions.RequestException as e:
+    except requests.RequestException as e:
         st.error(f"Connection to API failed: {e}")
         return False
 
-def signup_user(username: str, password: str) -> bool:
-    """Registers a new user."""
+def signup_user(username: str, email: str, password: str) -> bool:
     try:
-        response = requests.post(f"{API_URL}/auth/signup", json={"username": username, "password": password})
-        if response.status_code == 200:
+        payload = {"username": username, "email": email, "password": password}
+        response = requests.post(f"{API_URL}/auth/signup", json=payload)
+        if response.status_code == 201:
             st.success("Signup successful! Please log in.")
             return True
         else:
-            error_detail = response.json().get('detail', 'Unknown error')
-            st.error(f"Signup failed: {error_detail}")
+            st.error(f"Signup failed: {response.json().get('detail', 'Unknown error')}")
             return False
-    except requests.exceptions.RequestException as e:
+    except requests.RequestException as e:
         st.error(f"Connection to API failed: {e}")
         return False
 
 def logout_user():
-    """Clears session state for logout."""
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    st.success("Logged out successfully. Please log in again.")
+    initialize_session_state()
+    st.query_params.clear()
+    st.query_params["logout"] = "true"
     st.rerun()
 
-def delete_user_account():
-    """Deletes the current user's account."""
-    try:
-        response = requests.delete(f"{API_URL}/auth/users/me", headers=get_auth_headers())
-        if response.status_code == 204:
-            st.success("Account deleted successfully. You will be logged out.")
-            logout_user()
-        else:
-            error_detail = response.json().get('detail', 'Could not delete account')
-            st.error(f"Error deleting account: {error_detail}")
-    except requests.exceptions.RequestException as e:
-        st.error(f"Connection to API failed: {e}")
-
 def auth_page():
-    """Renders the authentication page for login and signup."""
-    st.title("Welcome to Chat with Documents")
-    st.markdown("Chat with your documents using advanced AI.")
-    
-    login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
-
-    with login_tab:
+    if "logout" in st.query_params:
+        st.success("You have been logged out successfully.")
+        st.query_params.clear()
+    st.title("🤖 Chat with Your Docs")
+    st.markdown("Unlock insights from your documents using AI. **Log in or create an account to get started.**")
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Login")
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login")
-            if submitted:
+            if st.form_submit_button("Login", use_container_width=True):
                 if login_user(username, password):
                     st.rerun()
-
-    with signup_tab:
+        st.divider()
+        st.markdown("Or sign in with a single click:")
+        google_login_url = f"{PUBLIC_API_URL}/auth/login/google"
+        st.link_button("Sign in with Google", google_login_url, use_container_width=True)
+        # **FIX: Restored the disabled Apple login button.**
+        st.button("Sign in with Apple (Coming Soon)", use_container_width=True, disabled=True)
+    with col2:
+        st.subheader("Create an Account")
         with st.form("signup_form"):
-            new_username = st.text_input("Choose a Username")
-            new_password = st.text_input("Choose a Password", type="password")
-            submitted = st.form_submit_button("Sign Up")
-            if submitted:
-                signup_user(new_username, new_password)
+            new_username = st.text_input("Username", key="su_u")
+            new_email = st.text_input("Email", key="su_e")
+            new_password = st.text_input("Password", type="password", key="su_p")
+            if st.form_submit_button("Sign Up", use_container_width=True):
+                signup_user(new_username, new_email, new_password)
 
-def get_auth_headers() -> Dict[str, str]:
-    """Returns the authorization headers for API requests."""
-    if "token" in st.session_state:
-        return {"Authorization": f"Bearer {st.session_state.token}"}
-    return {}
+# --- API Helper Functions ---
+def get_auth_headers(): 
+    return {"Authorization": f"Bearer {st.session_state.token}"} if st.session_state.token else {}
 
-def get_projects() -> List[Dict[str, Any]]:
-    """Fetches the list of projects for the authenticated user."""
+def api_request(method, endpoint, timeout=60, **kwargs):
     try:
-        res = requests.get(f"{API_URL}/projects/", headers=get_auth_headers())
+        res = requests.request(method, f"{API_URL}/{endpoint}", headers=get_auth_headers(), timeout=timeout, **kwargs)
         res.raise_for_status()
-        return res.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching projects: {e}")
-        return []
-
-def create_project(name: str) -> Optional[Dict[str, Any]]:
-    """Creates a new project."""
-    try:
-        res = requests.post(f"{API_URL}/projects/", json={"name": name}, headers=get_auth_headers())
-        res.raise_for_status()
-        st.success(f"Project '{name}' created successfully!")
-        return res.json()
-    except requests.exceptions.RequestException as e:
-        error_detail = e.response.json().get('detail', 'An unexpected error occurred') if e.response else 'Connection Error'
-        st.error(f"Failed to create project '{name}': {error_detail}")
+        return res
+    except requests.exceptions.ReadTimeout:
+        st.error(f"API request timed out after {timeout} seconds. The server may be busy or loading a large model.")
         return None
-
-def get_documents(project_id: str) -> List[Dict[str, Any]]:
-    """Fetches documents for a specific project."""
-    try:
-        res = requests.get(f"{API_URL}/documents/{project_id}", headers=get_auth_headers())
-        res.raise_for_status()
-        return res.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching documents: {e}")
-        return []
-
-def upload_document_file(project_id: str, file: st.file_uploader) -> bool:
-    """Uploads a single document file."""
-    try:
-        files = {'file': (file.name, file.getvalue(), file.type)}
-        res = requests.post(f"{API_URL}/documents/upload/{project_id}", files=files, headers=get_auth_headers())
-        res.raise_for_status()
-        st.success(f"'{file.name}' uploaded. Processing started.")
-        return True
-    except requests.exceptions.RequestException as e:
-        error_detail = e.response.json().get('detail', 'An unexpected error occurred') if e.response else 'Connection Error'
-        st.error(f"Failed to upload '{file.name}': {error_detail}")
-        return False
-
-def upload_document_from_url(project_id: str, url: str) -> bool:
-    """Adds a document from a URL."""
-    try:
-        payload = {"url": url}
-        res = requests.post(f"{API_URL}/documents/upload_url/{project_id}", json=payload, headers=get_auth_headers())
-        res.raise_for_status()
-        st.success(f"URL '{url}' added. Processing started.")
-        return True
-    except requests.exceptions.RequestException as e:
-        error_detail = e.response.json().get('detail', 'An unexpected error occurred') if e.response else 'Connection Error'
-        st.error(f"Failed to add URL '{url}': {error_detail}")
-        return False
-
-def delete_document(project_id: str, document_id: str) -> bool:
-    """Deletes a document."""
-    try:
-        res = requests.delete(f"{API_URL}/documents/{project_id}/{document_id}", headers=get_auth_headers())
-        if res.status_code == 204:
-            st.success("Document deleted successfully.")
-            return True
-        else:
-            error_detail = res.json().get('detail', 'An unexpected error occurred') if res.response else 'Unknown Error'
-            st.error(f"Failed to delete document: {error_detail}")
-            return False
-    except requests.exceptions.RequestException as e:
-        st.error(f"Connection to API failed: {e}")
-        return False
-
-def get_chat_sessions(project_id: str) -> List[Dict[str, Any]]:
-    """Fetches chat sessions for a project."""
-    try:
-        res = requests.get(f"{API_URL}/chat/sessions/{project_id}", headers=get_auth_headers())
-        res.raise_for_status()
-        return res.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching chat history: {e}")
-        return []
-
-def get_chat_session_messages(project_id: str, session_id: str) -> Optional[Dict[str, Any]]:
-    """Fetches messages for a specific chat session."""
-    try:
-        res = requests.get(f"{API_URL}/chat/sessions/{project_id}/{session_id}", headers=get_auth_headers())
-        res.raise_for_status()
-        return res.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching chat session messages: {e}")
-        return None
-
-def delete_chat_session(project_id: str, session_id: str) -> bool:
-    """Deletes a chat session."""
-    try:
-        res = requests.delete(f"{API_URL}/chat/sessions/{project_id}/{session_id}", headers=get_auth_headers())
-        if res.status_code == 204:
-            st.success("Chat session deleted.")
-            return True
-        else:
+        detail = str(e)
+        if e.response is not None:
             try:
-                error_detail = res.json().get('detail', 'An unexpected error occurred.')
-            except json.JSONDecodeError:
-                error_detail = res.text
-            st.error(f"Failed to delete chat session (Status {res.status_code}): {error_detail}")
-            return False
-    except requests.exceptions.RequestException as e:
-        st.error(f"Connection to API failed during delete: {e}")
-        return False
-
-def send_chat_query(project_id: str, query: str, chat_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Sends a query to the chat API."""
-    payload = {"query": query}
-    if chat_id:
-        payload["chat_id"] = chat_id
-    try:
-        res = requests.post(f"{API_URL}/chat/{project_id}", json=payload, headers=get_auth_headers())
-        res.raise_for_status()
-        return res.json()
-    except requests.exceptions.RequestException as e:
-        error_detail = e.response.json().get('detail', 'An unexpected error occurred') if e.response else 'Connection Error'
-        st.error(f"Chat query failed: {error_detail}")
+                detail = e.response.json().get('detail', e.response.text)
+            except (AttributeError, json.JSONDecodeError):
+                pass
+        st.error(f"API Error: {detail}")
         return None
 
+# --- Main Application UI ---
 def project_sidebar():
-    """Renders the project selection and creation UI in the sidebar."""
     st.sidebar.title(f"Welcome, {st.session_state.username}!")
-    projects = get_projects()
-    project_names = [p['name'] for p in projects]
+    if (projects_res := api_request("GET", "projects/")):
+        st.session_state.projects = projects_res.json()
+    else:
+        st.session_state.projects = []
+        
+    project_names = [p['name'] for p in st.session_state.projects]
     st.sidebar.header("Projects")
-    if 'current_project_name' not in st.session_state or st.session_state.current_project_name not in project_names:
-        st.session_state.current_project_name = project_names[0] if project_names else None
-        st.session_state.current_chat_id = None
-        st.session_state.messages = {}
-    selected_project_name = st.sidebar.selectbox(
-        "Select a Project",
-        options=project_names,
-        index=project_names.index(st.session_state.current_project_name) if st.session_state.current_project_name in project_names else 0,
-        key="project_select"
-    )
-    if selected_project_name != st.session_state.current_project_name:
-        st.session_state.current_project_name = selected_project_name
-        st.session_state.current_chat_id = None
-        st.session_state.messages = {}
-        st.rerun()
-    project_id = next((p['id'] for p in projects if p['name'] == selected_project_name), None)
-    st.session_state.current_project_id = project_id
-    with st.sidebar.expander("Create New Project", expanded=False):
-        with st.form("new_project_form", clear_on_submit=True):
-            new_project_name = st.text_input("Project Name")
-            if st.form_submit_button("Create"):
-                if new_project_name:
-                    created_project = create_project(new_project_name)
-                    if created_project:
-                        st.session_state.current_project_name = created_project['name']
-                        st.rerun()
-                else:
-                    st.warning("Project name cannot be empty.")
+    if project_names:
+        if st.session_state.current_project_name not in project_names:
+            st.session_state.current_project_name = project_names[0]
+            st.session_state.current_chat_id = None
+        
+        idx = project_names.index(st.session_state.current_project_name)
+        selected_name = st.sidebar.selectbox("Select Project", options=project_names, index=idx)
+        
+        if selected_name != st.session_state.current_project_name:
+            st.session_state.current_project_name = selected_name
+            st.session_state.current_chat_id = None
+            st.rerun()
+            
+        current_project = next((p for p in st.session_state.projects if p['name'] == selected_name), {})
+        st.session_state.current_project_id = current_project.get('id')
+        provider = current_project.get('llm_provider','N/A').upper()
+        model_name = current_project.get('llm_model_name', 'N/A')
+        st.sidebar.caption(f"Provider: {provider} | Model: {model_name}")
+    else:
+        st.sidebar.info("Create a project to get started.")
+
+    with st.sidebar.expander("Create New Project"):
+        def provider_changed():
+            st.session_state.new_project_provider = st.session_state._provider_selector
+        provider = st.selectbox("LLM Provider", list(MODEL_OPTIONS.keys()), format_func=lambda x: f"{x.capitalize()} {'(Cloud)' if x=='groq' else '(Local)'}", key="_provider_selector", on_change=provider_changed)
+        name = st.text_input("Project Name", key="new_proj_name")
+        models = MODEL_OPTIONS.get(st.session_state.new_project_provider, {})
+        model_name = st.selectbox("Select Model", list(models.keys()))
+        if st.button("Create Project", use_container_width=True):
+            if name and model_name:
+                payload = {"name": name, "llm_provider": provider, "llm_model_name": models[model_name]}
+                if res := api_request("POST", "projects/", json=payload):
+                    st.session_state.current_project_name = res.json()['name']
+                    st.rerun()
+
+    st.sidebar.header("Profile")
+    if st.sidebar.button("Logout", use_container_width=True):
+        logout_user()
+
+def chat_history_sidebar():
     st.sidebar.header("Chat History")
-    if project_id:
-        chat_sessions = get_chat_sessions(project_id)
-        if st.sidebar.button("➕ New Chat", key="new_chat_btn"):
+    if not st.session_state.current_project_id:
+        return
+    
+    col1, col2 = st.sidebar.columns([3, 1])
+    with col1:
+        if st.button("➕ New Chat", use_container_width=True):
             st.session_state.current_chat_id = None
             st.session_state.messages = {}
             st.rerun()
-        for session in chat_sessions:
-            col_title, col_del = st.sidebar.columns([3, 1])
-            col_title.button(session['title'], key=f"session_{session['id']}", use_container_width=True, on_click=select_chat_session, args=(project_id, session['id'], session['messages']))
-            if col_del.button("🗑️", key=f"del_session_{session['id']}", type="primary", use_container_width=True):
-                if delete_chat_session(project_id, session['id']):
-                    if st.session_state.current_chat_id == session['id']:
-                        st.session_state.current_chat_id = None
-                        st.session_state.messages = {}
+    with col2:
+        if st.session_state.current_chat_id:
+            if st.button("🗑️", use_container_width=True, help="Delete current chat"):
+                api_request("DELETE", f"chat/sessions/{st.session_state.current_project_id}/{st.session_state.current_chat_id}")
+                st.session_state.current_chat_id = None
+                st.session_state.messages = {}
+                st.rerun()
+
+    if sessions_res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}"):
+        for session in sessions_res.json():
+            # **FIX: Use correct 'type' argument for st.button**
+            is_selected = st.session_state.current_chat_id == session['id']
+            button_type = "secondary" if is_selected else "normal"
+            if st.sidebar.button(session['title'], key=f"session_{session['id']}", use_container_width=True):
+                if not is_selected:
+                    st.session_state.current_chat_id = session['id']
                     st.rerun()
-    else:
-        st.sidebar.info("Create a project to start chatting.")
-    st.sidebar.header("Account")
-    if st.sidebar.button("Logout"):
-        logout_user()
-    with st.sidebar.expander("Delete Account", expanded=False):
-        st.warning("This action is irreversible and will delete all your projects and data.")
-        if st.button("Confirm Account Deletion", type="secondary"):
-            delete_user_account()
 
-def select_chat_session(project_id: str, session_id: str, messages_data: List[Dict[str, Any]]):
-    """Callback to set the current chat session and load messages."""
-    st.session_state.current_chat_id = session_id
-    st.session_state.messages[session_id] = messages_data
-    st.rerun()
-
-def chat_pane(project_id: str):
-    """Renders the chat interface for a project."""
-    st.subheader(f"Chat with '{st.session_state.current_project_name}'")
-    if 'messages' not in st.session_state:
-        st.session_state.messages = {}
-    if 'current_chat_id' not in st.session_state:
-        st.session_state.current_chat_id = None
-    chat_key = st.session_state.current_chat_id
-    if chat_key and chat_key in st.session_state.messages:
-        for msg in st.session_state.messages[chat_key]:
+def chat_pane():
+    st.header(f"Project: {st.session_state.current_project_name}")
+    if st.session_state.current_chat_id:
+        if 'messages' not in st.session_state or st.session_state.messages.get('chat_id') != st.session_state.current_chat_id:
+            if res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}/{st.session_state.current_chat_id}"):
+                st.session_state.messages = {'chat_id': st.session_state.current_chat_id, 'history': res.json()['messages']}
+        for msg in st.session_state.messages.get('history', []):
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-                if msg.get("sources"):
-                    with st.expander("Sources"):
-                        try:
-                            sources = json.loads(msg["sources"]) if isinstance(msg["sources"], str) else msg["sources"]
-                            for source in sources:
-                                st.info(f"Source: {source.get('source', 'N/A')}")
-                                st.text(source.get('content', ''))
-                        except Exception:
-                            st.warning("Could not parse sources.")
-    elif not chat_key:
-        st.info("Click on a chat session in the sidebar or start a 'New Chat' to begin.")
-    prompt = st.chat_input("Ask a question about your documents...")
-    if prompt:
+    else:
+        st.session_state.messages = {}
+    
+    if prompt := st.chat_input("Ask a question about your documents..."):
+        history = st.session_state.messages.setdefault('history', [])
+        history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-        payload = {"query": prompt}
-        if chat_key:
-            payload["chat_id"] = chat_key
         with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            message_placeholder.markdown("Thinking...")
-            response_data = send_chat_query(project_id, prompt, chat_key)
-            if response_data:
-                answer = response_data.get("answer", "Sorry, I couldn't generate an answer.")
-                message_placeholder.markdown(answer)
-                if not chat_key:
-                    new_chat_id = response_data.get('chat_id')
-                    if new_chat_id:
-                        st.session_state.current_chat_id = new_chat_id
-                        st.session_state.messages[new_chat_id] = []
-                        st.session_state.messages[new_chat_id].append({"role": "assistant", "content": answer, "sources": response_data.get("sources")})
-                        st.session_state.messages[new_chat_id].append({"role": "user", "content": prompt})
-                        st.rerun()
-                else:
-                    st.session_state.messages[chat_key].append({"role": "assistant", "content": answer, "sources": response_data.get("sources")})
-                    st.session_state.messages[chat_key].append({"role": "user", "content": prompt})
-                if response_data.get("sources"):
-                    with st.expander("Sources"):
-                        for source in response_data["sources"]:
-                            st.info(f"Source: {source.get('source', 'N/A')}")
-                            st.text(source.get('content', ''))
+            current_project = next((p for p in st.session_state.projects if p['id'] == st.session_state.current_project_id), {})
+            spinner_msg = "The first query with a local model can take 2-3 minutes to load. Subsequent queries will be fast." if current_project.get('llm_provider') == 'ollama' else "Searching documents..."
+            with st.spinner(spinner_msg):
+                res = api_request("POST", f"chat/{st.session_state.current_project_id}", json={"query": prompt, "chat_id": st.session_state.current_chat_id}, timeout=300)
+            if res:
+                data = res.json()
+                st.markdown(data["answer"])
+                history.append({"role": "assistant", "content": data["answer"]})
+                with st.expander("Sources"):
+                    for src in data["sources"]:
+                        st.info(f"Source: {src.get('source', 'N/A')}\n\n---\n\n{src.get('content', '')}")
+                if not st.session_state.current_chat_id:
+                    st.session_state.current_chat_id = data['chat_id']
+                    st.rerun()
             else:
-                message_placeholder.markdown("An error occurred while trying to get an answer.")
+                history.pop()
 
-def document_manager_pane(project_id: str):
-    """Renders the document management UI in the main area."""
-    st.subheader(f"Documents for '{st.session_state.current_project_name}'")
-    col_upload_file, col_upload_url = st.columns([1, 1])
-    with col_upload_file:
+def document_manager_pane():
+    st.header(f"Manage Documents for '{st.session_state.current_project_name}'")
+    c1, c2 = st.columns(2)
+    with c1:
         with st.expander("Upload New Documents", expanded=True):
-            uploaded_files = st.file_uploader(
-                "Upload PDF, DOCX, TXT, MD files",
-                type=["pdf", "docx", "txt", "md"],
-                accept_multiple_files=True
-            )
-            if st.button("Upload Files", key="upload_btn"):
-                if uploaded_files:
-                    with st.spinner("Uploading files..."):
-                        success_count = 0
-                        for file in uploaded_files:
-                            if upload_document_file(project_id, file):
-                                success_count += 1
-                        if success_count == len(uploaded_files):
-                            st.success(f"All {success_count} files uploaded. Check status below.")
-                        elif success_count > 0:
-                            st.warning(f"{success_count} out of {len(uploaded_files)} files uploaded successfully.")
-                        st.rerun()
-                else:
-                    st.warning("Please select at least one file to upload.")
-    with col_upload_url:
+            files = st.file_uploader("Upload files", type=["pdf", "docx", "txt", "md"], accept_multiple_files=True, key=f"uploader_{st.session_state.current_project_id}")
+            if st.button("Upload Files", use_container_width=True) and files:
+                count = sum(1 for f in files if api_request("POST", f"documents/upload/{st.session_state.current_project_id}", files={'file': (f.name, f.getvalue(), f.type)}))
+                if count > 0:
+                    st.success(f"{count}/{len(files)} files uploaded. Processing started.")
+                    st.rerun()
+    with c2:
         with st.expander("Add Document from URL", expanded=True):
-            url_input = st.text_input("Enter a URL", key="url_input")
-            if st.button("Add URL", key="add_url_btn"):
-                if url_input:
-                    with st.spinner("Processing URL..."):
-                        if upload_document_from_url(project_id, url_input):
-                            st.rerun()
-                else:
-                    st.warning("Please enter a URL.")
+            url = st.text_input("Enter a URL", key=f"url_input_{st.session_state.current_project_id}")
+            if st.button("Add URL", use_container_width=True) and url:
+                if api_request("POST", f"documents/upload_url/{st.session_state.current_project_id}", json={"url": url}):
+                    st.success(f"URL added. Processing started.")
+                    st.rerun()
+
     st.markdown("---")
     st.subheader("Project Documents")
-    if st.button("Refresh Document Status"):
-        st.rerun()
-    docs = get_documents(project_id)
-    if not docs:
-        st.info("No documents have been uploaded to this project yet. Use the upload sections above.")
-    else:
-        doc_data = []
-        for doc in docs:
-            status = doc.get('status', 'UNKNOWN')
-            status_display = ""
-            if status == "COMPLETED":
-                status_display = "✅ Completed"
-            elif status == "PROCESSING":
-                status_display = "⏳ Processing..."
-            elif status == "PENDING":
-                status_display = "⚪ Pending"
+    
+    placeholder = st.empty()
+    def check_and_display_status(container):
+        is_processing = False
+        docs = []
+        if res := api_request("GET", f"documents/{st.session_state.current_project_id}"):
+            docs = res.json()
+        
+        with container:
+            if not docs:
+                st.info("No documents have been added to this project yet.")
             else:
-                status_display = "❌ Failed"
-            created_at_str = "N/A"
-            try:
-                created_at_str = pd.to_datetime(doc.get('created_at', '')).strftime('%Y-%m-%d %H:%M')
-            except Exception:
-                pass
-            doc_data.append({
-                "File Name": doc.get('file_name', 'N/A'),
-                "Status": status_display,
-                "Uploaded On": created_at_str,
-                "Actions": {
-                    "id": doc.get('id'),
-                    "file_name": doc.get('file_name', 'N/A')
-                }
-            })
-        df = pd.DataFrame(doc_data)
-        if not df.empty:
-            cols = st.columns([3, 2, 2, 1])
-            cols[0].markdown("**File Name**")
-            cols[1].markdown("**Status**")
-            cols[2].markdown("**Uploaded On**")
-            cols[3].markdown("**Action**")
-            for index, row in df.iterrows():
-                cols[0].write(row["File Name"])
-                status_text = row["Status"]
-                if "Completed" in status_text:
-                    cols[1].success(status_text)
-                elif "Processing" in status_text:
-                    cols[1].warning(status_text)
-                elif "Pending" in status_text:
-                    cols[1].info(status_text)
-                else:
-                    cols[1].error(status_text)
-                cols[2].write(row["Uploaded On"])
-                if cols[3].button("🗑️", key=f"delete_doc_{row['Actions']['id']}", type="secondary", use_container_width=True):
-                    if st.session_state.current_project_id and row["Actions"]["id"]:
-                        if delete_document(st.session_state.current_project_id, row["Actions"]["id"]):
+                for doc in docs:
+                    status = doc.get('status', 'UNKNOWN')
+                    if status in ['PENDING', 'PROCESSING']:
+                        is_processing = True
+                    icon = {"PENDING": "⚪️", "PROCESSING": "⏳", "COMPLETED": "✅", "FAILED": "❌"}.get(status, "❓")
+                    c1, c2 = st.columns([4, 1])
+                    c1.text(f"{icon} {doc.get('file_name', 'N/A')}")
+                    if c2.button("Delete", key=f"del_{doc['id']}", use_container_width=True):
+                        if api_request("DELETE", f"documents/{st.session_state.current_project_id}/{doc['id']}"):
                             st.rerun()
-                    else:
-                        st.error("Cannot delete document. Project or Document ID missing.")
-        else:
-            st.info("No documents found for this project.")
+        return is_processing
+
+    if check_and_display_status(placeholder):
+        with st.spinner("Processing documents... Status will auto-refresh."):
+            time.sleep(5)
+            st.rerun()
 
 def main_app():
-    """Renders the main application interface after authentication."""
+    st.sidebar.image("https://www.onepointltd.com/wp-content/uploads/2020/03/inno2.png")
     project_sidebar()
-    st.header(f"Project: {st.session_state.current_project_name}")
-    st.write("---")
-    col_chat, col_docs = st.columns([2, 1])
-    with col_chat:
-        if st.session_state.current_project_id:
-            chat_pane(st.session_state.current_project_id)
-        else:
-            st.warning("Please select a project from the sidebar to start chatting.")
-    with col_docs:
-        if st.session_state.current_project_id:
-            document_manager_pane(st.session_state.current_project_id)
-        else:
-            st.warning("Please select a project from the sidebar to manage documents.")
+    if st.session_state.current_project_id:
+        chat_history_sidebar()
+        main, docs = st.columns([2, 1])
+        with main:
+            chat_pane()
+        with docs:
+            document_manager_pane()
+    else:
+        st.info("Please create or select a project from the sidebar to begin.")
 
 if __name__ == "__main__":
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-    if "username" not in st.session_state:
-        st.session_state.username = None
-    if "token" not in st.session_state:
-        st.session_state.token = None
-    if "current_project_name" not in st.session_state:
-        st.session_state.current_project_name = None
-    if "current_project_id" not in st.session_state:
-        st.session_state.current_project_id = None
-    if "current_chat_id" not in st.session_state:
-        st.session_state.current_chat_id = None
-    if "messages" not in st.session_state:
-        st.session_state.messages = {}
+    initialize_session_state()
+    handle_oauth_token()
     if st.session_state.logged_in:
         main_app()
     else:

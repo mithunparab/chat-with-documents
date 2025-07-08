@@ -1,3 +1,5 @@
+# docker-compose.yml
+
 services:
   postgres:
     image: postgres:15
@@ -38,6 +40,25 @@ services:
     image: redis:7-alpine
     container_name: chat_with_docs_redis
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: chat_with_docs_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./start-ollama.sh:/start-ollama.sh
+    # ** THE CRITICAL FIX IS HERE **
+    # We override the default entrypoint to execute our script directly,
+    # instead of passing our script as an argument to the ollama program.
+    entrypoint: /start-ollama.sh
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 600s
+
   api:
     build:
       context: .
@@ -48,8 +69,18 @@ services:
     volumes:
       - ./app:/app/app
       - chroma_data:/app/chroma_data
+    command: >
+      sh -c "
+        echo 'Waiting for PostgreSQL...'
+        while ! nc -z postgres 5432; do sleep 1; done;
+        echo 'PostgreSQL started.'
 
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+        echo 'Waiting for Ollama...'
+        while ! nc -z ollama 11434; do sleep 1; done;
+        echo 'Ollama started.'
+        
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
+      "
     env_file:
       - .env
     depends_on:
@@ -59,14 +90,17 @@ services:
         condition: service_healthy
       redis: 
         condition: service_started
+      ollama:
+        condition: service_healthy
     environment:
       - POSTGRES_SERVER=postgres
+      - OLLAMA_HOST=http://ollama:11434
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "nc", "-z", "localhost", "8000"]
       interval: 10s
-      timeout: 10s
+      timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 60s
 
   celery_worker:
     build:
@@ -79,11 +113,16 @@ services:
       - chroma_data:/app/chroma_data
     env_file:
       - .env
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_healthy
     environment:
       - POSTGRES_SERVER=postgres
-    depends_on:
-      - api
-      - redis
+      - OLLAMA_HOST=http://ollama:11434
 
   frontend:
     build:
@@ -105,3 +144,4 @@ volumes:
   postgres_data:
   minio_data:
   chroma_data:
+  ollama_data: {}
