@@ -29,12 +29,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# --- Helper functions for the new architecture ---
-
-def get_bm25_cache_key(project_id: str) -> str:
-    """Generates a consistent Redis key for a project's BM25 retriever."""
-    return f"bm25_retriever:{project_id}"
-
 def get_docs_cache_key(project_id: str) -> str:
     """Generates a consistent Redis key for a project's document chunks."""
     return f"project_docs:{project_id}"
@@ -95,7 +89,6 @@ class RAGService:
             rag_query_keys = [k.decode('utf-8') for k in self.redis_client.scan_iter(f"rag_cache:{self.project.id}:*")]
             if rag_query_keys: self.redis_client.delete(*rag_query_keys)
             
-            self.redis_client.delete(get_bm25_cache_key(str(self.project.id)))
             self.redis_client.delete(get_docs_cache_key(str(self.project.id)))
             
             logger.info(f"Invalidated all caches for project {self.project.id}.")
@@ -128,94 +121,68 @@ class RAGService:
         self._invalidate_project_cache()
         logger.info(f"Added {len(chunks)} chunks for document {document_id}. Caches invalidated.")
     
-    # **FIX: Correct implementation for deleting chunks via LangChain wrapper**
     def delete_document_chunks(self, document_id: str):
-        """
-        Deletes all vector chunks associated with a specific document ID.
-        This now correctly fetches the chunk IDs first, then deletes them.
-        """
         logger.info(f"Preparing to delete chunks for document_id: {document_id}")
         try:
-            # Step 1: Get the ChromaDB collection object.
             collection = self.vectorstore._collection
-            
-            # Step 2: Find all chunks with the matching document_id metadata.
-            # We only need the 'ids' field, so we can pass an empty include list.
             chunks_to_delete = collection.get(where={"document_id": document_id}, include=[])
-            
-            # Step 3: Extract the list of unique IDs.
             ids_to_delete = chunks_to_delete['ids']
 
             if not ids_to_delete:
                 logger.info(f"No chunks found for document_id: {document_id}. Nothing to delete.")
                 return
 
-            # Step 4: Call the delete method with the specific list of IDs.
             logger.info(f"Found {len(ids_to_delete)} chunks to delete. Deleting now...")
             self.vectorstore.delete(ids=ids_to_delete)
             
-            # Step 5: Invalidate the project's caches.
             self._invalidate_project_cache()
             logger.info(f"Successfully deleted chunks for doc {document_id} and invalidated caches.")
         except Exception as e:
             logger.error(f"Error during chunk deletion for document {document_id}: {e}", exc_info=True)
 
-
     def _get_all_project_docs_from_chroma(self) -> List[Document]:
         """Loads all documents from ChromaDB. This is the 'slow' path."""
         try:
-            logger.info(f"Loading all project documents from ChromaDB for project {self.project.id}...")
+            logger.info(f"SLOW PATH: Loading all project documents from ChromaDB for project {self.project.id}...")
             results = self.vectorstore.get(include=["metadatas", "documents"])
             all_docs = [Document(page_content=text, metadata=meta or {}) for text, meta in zip(results['documents'] or [], results['metadatas'] or [])]
             logger.info(f"Loaded {len(all_docs)} documents from ChromaDB.")
-            
-            if self.redis_client and all_docs:
-                docs_cache_key = get_docs_cache_key(str(self.project.id))
-                self.redis_client.set(docs_cache_key, pickle.dumps(all_docs), ex=3600)
-            
             return all_docs
         except Exception as e:
             logger.error(f"Failed to load all project documents from Chroma: {e}", exc_info=True)
             return []
 
-    def _get_or_create_bm25_retriever(self) -> BM25Retriever:
-        """
-        Stateful BM25 Retriever.
-        Tries to load from Redis cache first. If not found, builds it from Chroma and caches it.
-        """
-        bm25_cache_key = get_bm25_cache_key(str(self.project.id))
+    def _get_cached_project_docs(self) -> List[Document]:
+        """Gets all document chunks for a project, using a Redis cache to avoid slow DB calls."""
+        if not self.redis_client:
+            return self._get_all_project_docs_from_chroma()
+
         docs_cache_key = get_docs_cache_key(str(self.project.id))
-
-        if self.redis_client and (cached_retriever := self.redis_client.get(bm25_cache_key)):
-            logger.info("BM25 Retriever loaded from Redis cache.")
-            return pickle.loads(cached_retriever)
         
-        all_docs = []
-        if self.redis_client and (cached_docs := self.redis_client.get(docs_cache_key)):
-            logger.info("Document chunks for BM25 loaded from Redis cache.")
-            all_docs = pickle.loads(cached_docs)
+        # 1. Try to get the document list from cache
+        if cached_docs := self.redis_client.get(docs_cache_key):
+            logger.info("FAST PATH: All document chunks for BM25 loaded from Redis cache.")
+            return pickle.loads(cached_docs)
         
-        if not all_docs:
-            all_docs = self._get_all_project_docs_from_chroma()
+        # 2. If not in cache, load from ChromaDB (slow path)
+        all_docs = self._get_all_project_docs_from_chroma()
 
-        if not all_docs:
-            return None
+        # 3. Cache the result for next time
+        if all_docs:
+            self.redis_client.set(docs_cache_key, pickle.dumps(all_docs), ex=3600) # Cache for 1 hour
 
-        logger.info("Building new BM25 Retriever and caching it to Redis...")
-        bm25_retriever = BM25Retriever.from_documents(all_docs, k=5)
-        if self.redis_client:
-            self.redis_client.set(bm25_cache_key, pickle.dumps(bm25_retriever), ex=3600)
-            
-        return bm25_retriever
+        return all_docs
 
     def query(self, message: str) -> Tuple[str, List[Dict[str, Any]]]:
-        if self.redis_client and (cached_result := self.redis_client.get(f"rag_cache:{self.project.id}:{hashlib.sha256(message.encode()).hexdigest()}")):
+        cache_key = f"rag_cache:{self.project.id}:{hashlib.sha256(message.encode()).hexdigest()}"
+        if self.redis_client and (cached_result := self.redis_client.get(cache_key)):
             return json.loads(cached_result)['answer'], json.loads(cached_result)['sources']
 
-        bm25_retriever = self._get_or_create_bm25_retriever()
-        if not bm25_retriever:
+        all_project_docs = self._get_cached_project_docs()
+        if not all_project_docs:
             return "This project has no documents. Please upload a document to begin.", []
-            
+        
+        bm25_retriever = BM25Retriever.from_documents(all_project_docs, k=5)
         vector_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 5})
         ensemble_retriever = EnsembleRetriever(retrievers=[bm25_retriever, vector_retriever], weights=[0.5, 0.5])
 
@@ -244,16 +211,15 @@ class RAGService:
         """)
         answer = (rag_prompt | self.llm).invoke({"context": context_text, "question": message}).content
         
-        unique_sources = {}
+        unique_sources: Dict[str, Dict[str, Any]] = {}
         for doc in final_docs:
-            source_name = doc.metadata.get("source", "Unknown")
-            if source_name not in unique_sources:
-                unique_sources[source_name] = doc
-
-        sources_info = [{"content": doc.page_content, "source": doc.metadata.get("source", "Unknown")} for doc in unique_sources.values()]
-
+            source_info: Dict[str, Any] = {"content": doc.page_content, "source": doc.metadata.get("source", "Unknown")}
+            unique_sources[doc.page_content] = source_info
+        
+        sources: List[Dict[str, Any]] = list(unique_sources.values())
+        
         if self.redis_client:
-            result_to_cache = {"answer": answer, "sources": sources_info}
-            self.redis_client.set(f"rag_cache:{self.project.id}:{hashlib.sha256(message.encode()).hexdigest()}", json.dumps(result_to_cache), ex=3600)
+            result_to_cache = {"answer": answer, "sources": sources}
+            self.redis_client.set(cache_key, json.dumps(result_to_cache), ex=3600)
 
-        return answer, sources_info
+        return answer, sources
