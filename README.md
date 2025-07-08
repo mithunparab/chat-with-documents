@@ -163,5 +163,3 @@ If you wish to use a local LLM instead of Groq or Google's models:
 The application is now configured to use your provided API keys and credentials, and it supports both cloud-based LLMs and local LLMs via Ollama.
 
 ---
-
-**Commit these changes to your repository.** This should be the final set of corrections needed. Thank you for your immense patience throughout this debugging process. I am confident this setup will work for you.
