@@ -21,7 +21,8 @@ langchain-ollama = "^0.1.0"
 langchain-chroma = "^0.1.1"
 groq = "^0.9.0"
 
-# Document Loaders (Lighter alternatives)
+# Document Loaders
+unstructured = "^0.14.9"
 beautifulsoup4 = "^4.12.3"
 pypdf = "^4.2.0"
 python-docx = "^1.1.2"
@@ -44,10 +45,11 @@ boto3 = "^1.34.111"
 
 # For frontend/CLI interaction
 requests = "^2.32.3"
-# The 'httpx' dependency is now GONE from this list.
 
+# Background Tasks & Streaming
 celery = {extras = ["redis"], version = "^5.4.0"}
 redis = "^5.0.4"
+sse-starlette = "^2.1.0"
 
 [build-system]
 requires = ["poetry-core"]

@@ -2,7 +2,11 @@ import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
 from app.core.config import settings
-from typing import BinaryIO
+from typing import BinaryIO, Optional
+import io
+import logging
+
+logger = logging.getLogger(__name__)
 
 s3_client = boto3.client(
     's3',
@@ -17,73 +21,80 @@ BUCKET_NAME: str = settings.MINIO_BUCKET_NAME
 def create_minio_bucket_if_not_exists() -> None:
     """
     Ensure the MinIO bucket exists. Create it if it does not exist.
-
-    Raises:
-        ClientError: If an error occurs other than bucket not found.
     """
     try:
         s3_client.head_bucket(Bucket=BUCKET_NAME)
-        print(f"Bucket '{BUCKET_NAME}' already exists.")
+        logger.info(f"Bucket '{BUCKET_NAME}' already exists.")
     except ClientError as e:
         if e.response['Error']['Code'] == '404':
-            print(f"Bucket '{BUCKET_NAME}' not found. Creating it.")
+            logger.info(f"Bucket '{BUCKET_NAME}' not found. Creating it.")
             s3_client.create_bucket(Bucket=BUCKET_NAME)
-            print(f"Bucket '{BUCKET_NAME}' created.")
+            logger.info(f"Bucket '{BUCKET_NAME}' created.")
         else:
-            print("Error checking for bucket:")
+            logger.error(f"Error checking for bucket: {e}", exc_info=True)
             raise
 
 def upload_file_obj(file_obj: BinaryIO, object_name: str) -> bool:
     """
     Upload a file-like object to the MinIO bucket.
-
-    Args:
-        file_obj (BinaryIO): File-like object to upload.
-        object_name (str): Name of the object in the bucket.
-
-    Returns:
-        bool: True if upload succeeded, False otherwise.
     """
     try:
         s3_client.upload_fileobj(file_obj, BUCKET_NAME, object_name)
     except ClientError as e:
-        print(f"Error uploading to MinIO: {e}")
+        logger.error(f"Error uploading to MinIO: {e}", exc_info=True)
         return False
     return True
 
 def download_file(object_name: str, file_path: str) -> bool:
     """
     Download an object from the MinIO bucket to a local file.
-
-    Args:
-        object_name (str): Name of the object in the bucket.
-        file_path (str): Local file path to save the object.
-
-    Returns:
-        bool: True if download succeeded, False otherwise.
     """
     try:
         s3_client.download_file(BUCKET_NAME, object_name, file_path)
     except ClientError as e:
-        print(f"Error downloading from MinIO: {e}")
+        if e.response.get("Error", {}).get("Code") == "404":
+            logger.warning(f"File '{object_name}' not found in MinIO.")
+        else:
+            logger.error(f"Error downloading from MinIO: {e}", exc_info=True)
         return False
     return True
 
 def delete_file(object_name: str) -> bool:
     """
     Delete an object from the MinIO bucket.
-
-    Args:
-        object_name (str): Name of the object in the bucket.
-
-    Returns:
-        bool: True if deletion succeeded, False otherwise.
     """
     try:
         s3_client.delete_object(Bucket=BUCKET_NAME, Key=object_name)
     except ClientError as e:
-        print(f"Error deleting from MinIO: {e}")
+        logger.error(f"Error deleting from MinIO: {e}", exc_info=True)
         return False
     return True
 
-# TODO: Add support for listing objects and handling bucket policies.
+def upload_in_memory_object(object_name: str, data: bytes) -> bool:
+    """
+    Upload an in-memory bytes object to MinIO.
+    """
+    try:
+        with io.BytesIO(data) as file_obj:
+            s3_client.upload_fileobj(file_obj, BUCKET_NAME, object_name)
+    except ClientError as e:
+        logger.error(f"Error uploading in-memory object to MinIO: {e}", exc_info=True)
+        return False
+    return True
+
+def download_in_memory_object(object_name: str) -> Optional[bytes]:
+    """
+    Download an object from MinIO into an in-memory bytes object.
+    Returns None if the object is not found.
+    """
+    try:
+        with io.BytesIO() as file_obj:
+            s3_client.download_fileobj(BUCKET_NAME, object_name, file_obj)
+            file_obj.seek(0)
+            return file_obj.read()
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "404":
+            logger.info(f"Object '{object_name}' not found in MinIO bucket '{BUCKET_NAME}'.")
+        else:
+            logger.error(f"Error downloading in-memory object from MinIO: {e}", exc_info=True)
+        return None

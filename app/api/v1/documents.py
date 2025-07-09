@@ -9,7 +9,7 @@ from app.db.database import get_db
 from app.core.dependencies import get_current_user
 from app.services import storage_service
 from app.services.rag_service import RAGService
-from app.tasks import process_document_task 
+from app.tasks import process_document_task, rebuild_project_index_task
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ def delete_document(
     current_user: models.User = Depends(get_current_user)
 ) -> Response:
     """
-    Delete a document from a project, including its stored file and vector embeddings.
+    Delete a document, its stored file, its vector embeddings, and trigger an index rebuild.
     """
     logger.info(f"User '{current_user.username}' attempting to delete document '{document_id}' from project '{project_id}'")
     
@@ -152,15 +152,20 @@ def delete_document(
         rag_service.delete_document_chunks(document_id=str(doc_to_delete.id))
 
         # Step 2: Delete the file from object storage
-        if not storage_service.delete_file(doc_to_delete.storage_key):
-            logger.error(f"Could not delete file '{doc_to_delete.storage_key}' from storage. Continuing with DB deletion.")
-        else:
-            logger.info(f"Successfully deleted file '{doc_to_delete.storage_key}' from storage.")
+        if not doc_to_delete.file_type == 'text/html': # Don't delete file for URLs
+            if not storage_service.delete_file(doc_to_delete.storage_key):
+                logger.error(f"Could not delete file '{doc_to_delete.storage_key}' from storage. Continuing with DB deletion.")
+            else:
+                logger.info(f"Successfully deleted file '{doc_to_delete.storage_key}' from storage.")
 
         # Step 3: Delete the document record from the database
         db.delete(doc_to_delete)
         db.commit()
         logger.info(f"Successfully deleted document record '{doc_to_delete.id}' from database.")
+
+        # Step 4: Trigger a background task to rebuild the persisted BM25 index
+        rebuild_project_index_task.delay(str(current_user.id), str(project_id))
+        logger.info(f"Queued BM25 index rebuild for project '{project_id}'.")
 
     except Exception as e:
         logger.error(f"Error during deletion of document {document_id}: {e}", exc_info=True)

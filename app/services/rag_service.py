@@ -2,17 +2,18 @@ import tempfile
 import json
 import hashlib
 import redis
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, AsyncGenerator
 import httpx
 import chromadb
 import pickle
 import io
 from langchain_community.document_loaders import (
     PyPDFLoader, UnstructuredURLLoader, UnstructuredWordDocumentLoader,
-    UnstructuredMarkdownLoader, TextLoader
+    UnstructuredMarkdownLoader, TextLoader, UnstructuredFileLoader
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document
+from langchain.schema.runnable import Runnable
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.chat_models import ChatOllama
 from langchain_chroma import Chroma
@@ -28,10 +29,6 @@ from app.db.models import Project, User
 import logging
 
 logger = logging.getLogger(__name__)
-
-def get_docs_cache_key(project_id: str) -> str:
-    """Generates a consistent Redis key for a project's document chunks."""
-    return f"project_docs:{project_id}"
 
 def _ensure_ollama_model_is_available(model_name: str):
     if not settings.OLLAMA_HOST: return
@@ -74,26 +71,28 @@ class RAGService:
         chroma_client = chromadb.PersistentClient(path=settings.CHROMA_PATH, settings=ChromaSettings(anonymized_telemetry=False))
         self.vectorstore = Chroma(client=chroma_client, collection_name=self.collection_name, embedding_function=self.embedding_function)
 
+    def _get_bm25_retriever_storage_key(self) -> str:
+        """Returns the MinIO storage key for the project's BM25 retriever."""
+        return f"_internal/{self.project.id}/bm25_retriever.pkl"
+
     def _get_loader(self, file_path, file_type, url=None):
         if url: return UnstructuredURLLoader(urls=[url], headers={"User-Agent": "Mozilla/5.0"})
         if file_type == "application/pdf": return PyPDFLoader(file_path)
         if file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document": return UnstructuredWordDocumentLoader(file_path)
         if file_type == "text/markdown": return UnstructuredMarkdownLoader(file_path)
         if file_type.startswith("text/"): return TextLoader(file_path)
-        return UnstructuredWordDocumentLoader(file_path)
+        logger.warning(f"Unknown file type '{file_type}'. Using generic UnstructuredFileLoader as fallback.")
+        return UnstructuredFileLoader(file_path)
 
-    def _invalidate_project_cache(self):
-        """Invalidates all caches related to a project."""
+    def _invalidate_query_cache(self):
+        """Invalidates all query caches related to a project."""
         if not self.redis_client: return
         try:
             rag_query_keys = [k.decode('utf-8') for k in self.redis_client.scan_iter(f"rag_cache:{self.project.id}:*")]
             if rag_query_keys: self.redis_client.delete(*rag_query_keys)
-            
-            self.redis_client.delete(get_docs_cache_key(str(self.project.id)))
-            
-            logger.info(f"Invalidated all caches for project {self.project.id}.")
+            logger.info(f"Invalidated query caches for project {self.project.id}.")
         except Exception as e:
-            logger.error(f"Failed to clear Redis cache for project {self.project.id}: {e}", exc_info=True)
+            logger.error(f"Failed to clear Redis query cache for project {self.project.id}: {e}", exc_info=True)
 
     def process_document(self, storage_key, file_type, file_name, document_id, url=None):
         if self.project.llm_provider == "ollama":
@@ -118,7 +117,7 @@ class RAGService:
             chunk.metadata.setdefault('source', url or file_name)
 
         self.vectorstore.add_documents(documents=chunks)
-        self._invalidate_project_cache()
+        self._invalidate_query_cache()
         logger.info(f"Added {len(chunks)} chunks for document {document_id}. Caches invalidated.")
     
     def delete_document_chunks(self, document_id: str):
@@ -134,16 +133,15 @@ class RAGService:
 
             logger.info(f"Found {len(ids_to_delete)} chunks to delete. Deleting now...")
             self.vectorstore.delete(ids=ids_to_delete)
-            
-            self._invalidate_project_cache()
-            logger.info(f"Successfully deleted chunks for doc {document_id} and invalidated caches.")
+            self._invalidate_query_cache()
+            logger.info(f"Successfully deleted chunks for doc {document_id} and invalidated query caches.")
         except Exception as e:
             logger.error(f"Error during chunk deletion for document {document_id}: {e}", exc_info=True)
 
     def _get_all_project_docs_from_chroma(self) -> List[Document]:
-        """Loads all documents from ChromaDB. This is the 'slow' path."""
+        """Loads all documents for a project from ChromaDB."""
         try:
-            logger.info(f"SLOW PATH: Loading all project documents from ChromaDB for project {self.project.id}...")
+            logger.info(f"Loading all project documents from ChromaDB for project {self.project.id}...")
             results = self.vectorstore.get(include=["metadatas", "documents"])
             all_docs = [Document(page_content=text, metadata=meta or {}) for text, meta in zip(results['documents'] or [], results['metadatas'] or [])]
             logger.info(f"Loaded {len(all_docs)} documents from ChromaDB.")
@@ -152,71 +150,120 @@ class RAGService:
             logger.error(f"Failed to load all project documents from Chroma: {e}", exc_info=True)
             return []
 
-    def _get_cached_project_docs(self) -> List[Document]:
-        """Gets all document chunks for a project, using a Redis cache to avoid slow DB calls."""
-        if not self.redis_client:
-            return self._get_all_project_docs_from_chroma()
-
-        docs_cache_key = get_docs_cache_key(str(self.project.id))
-        
-        # 1. Try to get the document list from cache
-        if cached_docs := self.redis_client.get(docs_cache_key):
-            logger.info("FAST PATH: All document chunks for BM25 loaded from Redis cache.")
-            return pickle.loads(cached_docs)
-        
-        # 2. If not in cache, load from ChromaDB (slow path)
+    def rebuild_and_persist_bm25_index(self):
+        """Rebuilds the BM25 index from all docs in Chroma and saves it to MinIO."""
+        logger.info(f"Starting BM25 index rebuild for project {self.project.id}")
         all_docs = self._get_all_project_docs_from_chroma()
+        storage_key = self._get_bm25_retriever_storage_key()
 
-        # 3. Cache the result for next time
-        if all_docs:
-            self.redis_client.set(docs_cache_key, pickle.dumps(all_docs), ex=3600) # Cache for 1 hour
+        if not all_docs:
+            logger.info(f"No documents found for project {self.project.id}. Deleting any existing BM25 index.")
+            storage_service.delete_file(storage_key)
+            return
 
-        return all_docs
+        bm25_retriever = BM25Retriever.from_documents(all_docs, k=5)
+        pickled_retriever = pickle.dumps(bm25_retriever)
+        
+        if storage_service.upload_in_memory_object(storage_key, pickled_retriever):
+            logger.info(f"Successfully rebuilt and persisted BM25 index to MinIO for project {self.project.id}")
+        else:
+            logger.error(f"Failed to upload persisted BM25 index to MinIO for project {self.project.id}")
+
+    def _load_bm25_retriever(self) -> Optional[BM25Retriever]:
+        """Loads the persisted BM25Retriever from MinIO."""
+        storage_key = self._get_bm25_retriever_storage_key()
+        try:
+            retriever_bytes = storage_service.download_in_memory_object(storage_key)
+            if retriever_bytes:
+                logger.info(f"Loaded BM25 index from MinIO for project {self.project.id}")
+                return pickle.loads(retriever_bytes)
+        except Exception as e:
+            logger.error(f"Could not load/unpickle BM25 index from {storage_key}: {e}", exc_info=True)
+        
+        logger.warning(f"BM25 index not found or failed to load for project {self.project.id}. Query will rely on vector search only.")
+        return None
+
+    def _get_retriever(self) -> Runnable:
+        """Constructs the final retriever, loading the persisted BM25 index."""
+        bm25_retriever = self._load_bm25_retriever()
+        vector_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 5})
+
+        if bm25_retriever:
+            return EnsembleRetriever(retrievers=[bm25_retriever, vector_retriever], weights=[0.5, 0.5])
+        else:
+            return vector_retriever
+
+    def _get_rag_chain(self) -> Runnable:
+        """Creates the RAG chain for answering questions."""
+        # --- ** THE FIX IS HERE ** ---
+        # This simpler, more direct prompt is more robust and works better with smaller, local LLMs.
+        prompt_template = """
+Answer the question based *only* on the following context.
+If the context does not contain the answer, say "The provided documents do not contain an answer to this question."
+
+Context:
+{context}
+
+Question:
+{question}
+"""
+        rag_prompt = ChatPromptTemplate.from_template(prompt_template)
+        return rag_prompt | self.llm
+
+    async def stream_query(self, message: str) -> Tuple[AsyncGenerator[str, None], List[Dict[str, Any]]]:
+        """Handles a streaming query, yielding sources first, then LLM tokens."""
+        retriever = self._get_retriever()
+        rag_chain = self._get_rag_chain()
+        
+        hyde_prompt = ChatPromptTemplate.from_template("Write a short hypothetical doc for this question: {question}")
+        hypothetical_doc_runnable = hyde_prompt | self.llm
+        hypothetical_doc = await hypothetical_doc_runnable.ainvoke({"question": message})
+        
+        final_docs = await retriever.ainvoke(hypothetical_doc.content)
+        
+        if not final_docs:
+            async def empty_generator():
+                yield "I couldn't find relevant information in your documents to answer the query."
+            return empty_generator(), []
+
+        context_text = "\n\n---\n\n".join([doc.page_content for doc in final_docs])
+        
+        unique_sources: Dict[str, Dict[str, Any]] = {}
+        for doc in final_docs:
+            source_info = {"content": doc.page_content, "source": doc.metadata.get("source", "Unknown")}
+            unique_sources[doc.page_content] = source_info
+        
+        sources = list(unique_sources.values())
+        
+        response_generator = (chunk.content async for chunk in rag_chain.astream({"context": context_text, "question": message}))
+        
+        return response_generator, sources
 
     def query(self, message: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """Handles a non-streaming query."""
         cache_key = f"rag_cache:{self.project.id}:{hashlib.sha256(message.encode()).hexdigest()}"
         if self.redis_client and (cached_result := self.redis_client.get(cache_key)):
             return json.loads(cached_result)['answer'], json.loads(cached_result)['sources']
 
-        all_project_docs = self._get_cached_project_docs()
-        if not all_project_docs:
-            return "This project has no documents. Please upload a document to begin.", []
-        
-        bm25_retriever = BM25Retriever.from_documents(all_project_docs, k=5)
-        vector_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 5})
-        ensemble_retriever = EnsembleRetriever(retrievers=[bm25_retriever, vector_retriever], weights=[0.5, 0.5])
+        retriever = self._get_retriever()
+        rag_chain = self._get_rag_chain()
 
         hyde_prompt = ChatPromptTemplate.from_template("Write a short hypothetical doc for this question: {question}")
         hypothetical_doc = (hyde_prompt | self.llm).invoke({"question": message}).content
-        final_docs = ensemble_retriever.invoke(hypothetical_doc)
+        final_docs = retriever.invoke(hypothetical_doc)
         
         if not final_docs:
             return "I couldn't find relevant information in your documents to answer the query.", []
 
         context_text = "\n\n---\n\n".join([doc.page_content for doc in final_docs])
-        rag_prompt = ChatPromptTemplate.from_template("""
-            You are a specialized assistant for answering questions based ONLY on the provided context.
-            CRITICAL INSTRUCTIONS:
-            1. ONLY use information from the `<context>` tags.
-            2. DO NOT use outside knowledge.
-            3. If the answer is not in the context, you MUST state "The provided documents do not contain an answer to this question."
-            <context>
-            {context}
-            </context>
-            Based *only* on the context above, answer this question:
-            <question>
-            {question}
-            </question>
-            Answer:
-        """)
-        answer = (rag_prompt | self.llm).invoke({"context": context_text, "question": message}).content
+        answer = rag_chain.invoke({"context": context_text, "question": message}).content
         
         unique_sources: Dict[str, Dict[str, Any]] = {}
         for doc in final_docs:
-            source_info: Dict[str, Any] = {"content": doc.page_content, "source": doc.metadata.get("source", "Unknown")}
+            source_info = {"content": doc.page_content, "source": doc.metadata.get("source", "Unknown")}
             unique_sources[doc.page_content] = source_info
         
-        sources: List[Dict[str, Any]] = list(unique_sources.values())
+        sources = list(unique_sources.values())
         
         if self.redis_client:
             result_to_cache = {"answer": answer, "sources": sources}

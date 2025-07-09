@@ -5,14 +5,14 @@ This module handles the complete user experience, including:
 - User authentication via password, Google, and Apple (OAuth2).
 - Project management with a choice of LLM providers (Cloud vs. Local).
 - Document management (upload, URL, status tracking with non-flickering auto-polling).
-- Real-time chat interaction with source citations.
+- Real-time, streaming chat interaction with source citations.
 - Deletion of chats and documents.
 """
 import streamlit as st
 import requests
 import pandas as pd
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Generator
 import os
 import time
 
@@ -62,7 +62,7 @@ def initialize_session_state():
         "current_project_id": None,
         "current_project_name": None,
         "current_chat_id": None,
-        "messages": {},
+        "messages": {}, # {chat_id: [messages]}
         "new_project_provider": "groq",
     }
     for key, value in defaults.items():
@@ -151,7 +151,6 @@ def auth_page():
         st.markdown("Or sign in with a single click:")
         google_login_url = f"{PUBLIC_API_URL}/auth/login/google"
         st.link_button("Sign in with Google", google_login_url, use_container_width=True)
-        # **FIX: Restored the disabled Apple login button.**
         st.button("Sign in with Apple (Coming Soon)", use_container_width=True, disabled=True)
     with col2:
         st.subheader("Create an Account")
@@ -171,9 +170,6 @@ def api_request(method, endpoint, timeout=60, **kwargs):
         res = requests.request(method, f"{API_URL}/{endpoint}", headers=get_auth_headers(), timeout=timeout, **kwargs)
         res.raise_for_status()
         return res
-    except requests.exceptions.ReadTimeout:
-        st.error(f"API request timed out after {timeout} seconds. The server may be busy or loading a large model.")
-        return None
     except requests.exceptions.RequestException as e:
         detail = str(e)
         if e.response is not None:
@@ -196,10 +192,10 @@ def project_sidebar():
     st.sidebar.header("Projects")
     if project_names:
         if st.session_state.current_project_name not in project_names:
-            st.session_state.current_project_name = project_names[0]
+            st.session_state.current_project_name = project_names[0] if project_names else None
             st.session_state.current_chat_id = None
         
-        idx = project_names.index(st.session_state.current_project_name)
+        idx = project_names.index(st.session_state.current_project_name) if st.session_state.current_project_name in project_names else 0
         selected_name = st.sidebar.selectbox("Select Project", options=project_names, index=idx)
         
         if selected_name != st.session_state.current_project_name:
@@ -235,67 +231,126 @@ def project_sidebar():
 
 def chat_history_sidebar():
     st.sidebar.header("Chat History")
-    if not st.session_state.current_project_id:
-        return
+    if not st.session_state.current_project_id: return
     
     col1, col2 = st.sidebar.columns([3, 1])
     with col1:
         if st.button("➕ New Chat", use_container_width=True):
             st.session_state.current_chat_id = None
-            st.session_state.messages = {}
             st.rerun()
     with col2:
         if st.session_state.current_chat_id:
             if st.button("🗑️", use_container_width=True, help="Delete current chat"):
                 api_request("DELETE", f"chat/sessions/{st.session_state.current_project_id}/{st.session_state.current_chat_id}")
                 st.session_state.current_chat_id = None
-                st.session_state.messages = {}
                 st.rerun()
 
     if sessions_res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}"):
         for session in sessions_res.json():
-            # **FIX: Use correct 'type' argument for st.button**
             is_selected = st.session_state.current_chat_id == session['id']
-            button_type = "secondary" if is_selected else "normal"
-            if st.sidebar.button(session['title'], key=f"session_{session['id']}", use_container_width=True):
+            # FIX: Use valid button types: "primary" for selected, "secondary" for others.
+            button_type = "primary" if is_selected else "secondary"
+            if st.sidebar.button(session['title'], key=f"session_{session['id']}", use_container_width=True, type=button_type):
                 if not is_selected:
                     st.session_state.current_chat_id = session['id']
                     st.rerun()
 
+def get_chat_messages(project_id, chat_id):
+    if res := api_request("GET", f"chat/sessions/{project_id}/{chat_id}"):
+        return res.json()['messages']
+    return []
+
 def chat_pane():
     st.header(f"Project: {st.session_state.current_project_name}")
-    if st.session_state.current_chat_id:
-        if 'messages' not in st.session_state or st.session_state.messages.get('chat_id') != st.session_state.current_chat_id:
-            if res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}/{st.session_state.current_chat_id}"):
-                st.session_state.messages = {'chat_id': st.session_state.current_chat_id, 'history': res.json()['messages']}
-        for msg in st.session_state.messages.get('history', []):
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-    else:
+    
+    # Load messages for the current chat
+    if 'messages' not in st.session_state:
         st.session_state.messages = {}
     
+    if st.session_state.current_chat_id and st.session_state.current_chat_id not in st.session_state.messages:
+        st.session_state.messages[st.session_state.current_chat_id] = get_chat_messages(
+            st.session_state.current_project_id, st.session_state.current_chat_id
+        )
+
+    # Display messages
+    current_messages = st.session_state.messages.get(st.session_state.current_chat_id, [])
+    for msg in current_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Stream handler for API response
+    def stream_handler(prompt: str) -> Generator[str, None, None]:
+        payload = {"query": prompt, "chat_id": st.session_state.current_chat_id}
+        url = f"{API_URL}/chat/stream/{st.session_state.current_project_id}"
+        event_type = ""
+        
+        try:
+            with requests.post(url, json=payload, headers=get_auth_headers(), stream=True, timeout=300) as response:
+                response.raise_for_status()
+                
+                with st.expander("Sources", expanded=True):
+                    sources_placeholder = st.empty()
+                    sources_placeholder.info("Retrieving sources...")
+
+                for line in response.iter_lines():
+                    if line:
+                        decoded_line = line.decode('utf-8')
+                        if decoded_line.startswith("event:"):
+                            event_type = decoded_line[len("event:"):].strip()
+                        elif decoded_line.startswith("data:"):
+                            data_json = decoded_line[len("data:"):].strip()
+                            
+                            if not data_json:
+                                continue
+                            
+                            try:
+                                data = json.loads(data_json)
+                            except json.JSONDecodeError:
+                                st.warning(f"Could not decode stream data: {data_json}")
+                                continue
+
+                            if event_type == "start" and not st.session_state.current_chat_id:
+                                st.session_state.current_chat_id = data['chat_id']
+                                if st.session_state.current_chat_id not in st.session_state.messages:
+                                    st.session_state.messages[st.session_state.current_chat_id] = []
+                            
+                            elif event_type == "sources":
+                                sources_placeholder.empty() 
+                                for i, src in enumerate(data):
+                                    with sources_placeholder.container():
+                                        st.info(f"**Source {i+1}: {src.get('source', 'N/A')}**\n\n---\n\n{src.get('content', '')}")
+                            
+                            elif event_type == "token":
+                                yield data
+                            
+                            elif event_type == "error":
+                                st.error(f"An error occurred in the stream: {data}")
+
+        except requests.RequestException as e:
+            st.error(f"Failed to connect to streaming API: {e}")
+            yield "" # End the generator
+
+    # Chat input and response streaming
     if prompt := st.chat_input("Ask a question about your documents..."):
-        history = st.session_state.messages.setdefault('history', [])
-        history.append({"role": "user", "content": prompt})
+        # Ensure message list exists for the current chat
+        if st.session_state.current_chat_id not in st.session_state.messages:
+            st.session_state.messages[st.session_state.current_chat_id] = []
+        current_messages = st.session_state.messages[st.session_state.current_chat_id]
+
+        current_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
+
         with st.chat_message("assistant"):
             current_project = next((p for p in st.session_state.projects if p['id'] == st.session_state.current_project_id), {})
-            spinner_msg = "The first query with a local model can take 2-3 minutes to load. Subsequent queries will be fast." if current_project.get('llm_provider') == 'ollama' else "Searching documents..."
+            spinner_msg = "The first query with a local model can take 2-3 minutes to load. Subsequent queries will be fast." if current_project.get('llm_provider') == 'ollama' else "Thinking..."
             with st.spinner(spinner_msg):
-                res = api_request("POST", f"chat/{st.session_state.current_project_id}", json={"query": prompt, "chat_id": st.session_state.current_chat_id}, timeout=300)
-            if res:
-                data = res.json()
-                st.markdown(data["answer"])
-                history.append({"role": "assistant", "content": data["answer"]})
-                with st.expander("Sources"):
-                    for src in data["sources"]:
-                        st.info(f"Source: {src.get('source', 'N/A')}\n\n---\n\n{src.get('content', '')}")
-                if not st.session_state.current_chat_id:
-                    st.session_state.current_chat_id = data['chat_id']
-                    st.rerun()
-            else:
-                history.pop()
+                full_response = st.write_stream(stream_handler(prompt))
+
+        current_messages.append({"role": "assistant", "content": full_response})
+        # A rerun is needed to refresh the chat history sidebar if a new chat was created
+        if len(current_messages) == 2:
+            st.rerun()
 
 def document_manager_pane():
     st.header(f"Manage Documents for '{st.session_state.current_project_name}'")
@@ -303,49 +358,52 @@ def document_manager_pane():
     with c1:
         with st.expander("Upload New Documents", expanded=True):
             files = st.file_uploader("Upload files", type=["pdf", "docx", "txt", "md"], accept_multiple_files=True, key=f"uploader_{st.session_state.current_project_id}")
-            if st.button("Upload Files", use_container_width=True) and files:
+            if files and st.button("Upload Files", use_container_width=True):
                 count = sum(1 for f in files if api_request("POST", f"documents/upload/{st.session_state.current_project_id}", files={'file': (f.name, f.getvalue(), f.type)}))
-                if count > 0:
+                if count > 0: 
                     st.success(f"{count}/{len(files)} files uploaded. Processing started.")
+                    st.cache_data.clear() # Clear cache to show new doc immediately
                     st.rerun()
+
     with c2:
         with st.expander("Add Document from URL", expanded=True):
             url = st.text_input("Enter a URL", key=f"url_input_{st.session_state.current_project_id}")
-            if st.button("Add URL", use_container_width=True) and url:
+            if url and st.button("Add URL", use_container_width=True):
                 if api_request("POST", f"documents/upload_url/{st.session_state.current_project_id}", json={"url": url}):
                     st.success(f"URL added. Processing started.")
+                    st.cache_data.clear() # Clear cache to show new doc immediately
                     st.rerun()
 
     st.markdown("---")
     st.subheader("Project Documents")
     
     placeholder = st.empty()
-    def check_and_display_status(container):
-        is_processing = False
-        docs = []
-        if res := api_request("GET", f"documents/{st.session_state.current_project_id}"):
-            docs = res.json()
-        
-        with container:
-            if not docs:
-                st.info("No documents have been added to this project yet.")
-            else:
-                for doc in docs:
-                    status = doc.get('status', 'UNKNOWN')
-                    if status in ['PENDING', 'PROCESSING']:
-                        is_processing = True
-                    icon = {"PENDING": "⚪️", "PROCESSING": "⏳", "COMPLETED": "✅", "FAILED": "❌"}.get(status, "❓")
-                    c1, c2 = st.columns([4, 1])
-                    c1.text(f"{icon} {doc.get('file_name', 'N/A')}")
-                    if c2.button("Delete", key=f"del_{doc['id']}", use_container_width=True):
-                        if api_request("DELETE", f"documents/{st.session_state.current_project_id}/{doc['id']}"):
-                            st.rerun()
-        return is_processing
+    
+    @st.cache_data(ttl=5) # Cache the API call to avoid flickering
+    def get_documents(project_id):
+        if res := api_request("GET", f"documents/{project_id}"):
+            return res.json()
+        return []
 
-    if check_and_display_status(placeholder):
-        with st.spinner("Processing documents... Status will auto-refresh."):
-            time.sleep(5)
-            st.rerun()
+    docs = get_documents(st.session_state.current_project_id)
+    is_processing = any(doc.get('status') in ['PENDING', 'PROCESSING'] for doc in docs)
+
+    with placeholder.container():
+        if not docs:
+            st.info("No documents have been added to this project yet.")
+        else:
+            for doc in docs:
+                status = doc.get('status', 'UNKNOWN')
+                icon = {"PENDING": "⚪️", "PROCESSING": "⏳", "COMPLETED": "✅", "FAILED": "❌"}.get(status, "❓")
+                c1, c2 = st.columns([4, 1])
+                c1.text(f"{icon} {doc.get('file_name', 'N/A')}")
+                if c2.button("Delete", key=f"del_{doc['id']}", use_container_width=True):
+                    if api_request("DELETE", f"documents/{st.session_state.current_project_id}/{doc['id']}"):
+                        st.cache_data.clear()
+                        st.rerun()
+    if is_processing:
+        time.sleep(5)
+        st.rerun()
 
 def main_app():
     st.sidebar.image("https://www.onepointltd.com/wp-content/uploads/2020/03/inno2.png")
