@@ -152,35 +152,37 @@ class RAGService:
 
     def rebuild_and_persist_bm25_index(self):
         """Rebuilds the BM25 index from all docs in Chroma and saves it to MinIO."""
-        logger.info(f"Starting BM25 index rebuild for project {self.project.id}")
+        logger.info(f"BM25_TASK: Starting BM25 index rebuild for project {self.project.id}")
         all_docs = self._get_all_project_docs_from_chroma()
         storage_key = self._get_bm25_retriever_storage_key()
 
         if not all_docs:
-            logger.info(f"No documents found for project {self.project.id}. Deleting any existing BM25 index.")
+            logger.warning(f"BM25_TASK: No documents found for project {self.project.id}. Deleting any existing BM25 index.")
             storage_service.delete_file(storage_key)
             return
 
+        logger.info(f"BM25_TASK: Building new index from {len(all_docs)} documents.")
         bm25_retriever = BM25Retriever.from_documents(all_docs, k=5)
         pickled_retriever = pickle.dumps(bm25_retriever)
         
         if storage_service.upload_in_memory_object(storage_key, pickled_retriever):
-            logger.info(f"Successfully rebuilt and persisted BM25 index to MinIO for project {self.project.id}")
+            logger.info(f"BM25_TASK: Successfully rebuilt and persisted BM25 index to MinIO.")
         else:
-            logger.error(f"Failed to upload persisted BM25 index to MinIO for project {self.project.id}")
+            logger.error(f"BM25_TASK: FAILED to upload persisted BM25 index to MinIO.")
 
     def _load_bm25_retriever(self) -> Optional[BM25Retriever]:
         """Loads the persisted BM25Retriever from MinIO."""
         storage_key = self._get_bm25_retriever_storage_key()
+        logger.info(f"QUERY_TIME: Attempting to load BM25 index from MinIO: {storage_key}")
         try:
             retriever_bytes = storage_service.download_in_memory_object(storage_key)
             if retriever_bytes:
-                logger.info(f"Loaded BM25 index from MinIO for project {self.project.id}")
+                logger.info(f"QUERY_TIME: Successfully loaded BM25 index from MinIO.")
                 return pickle.loads(retriever_bytes)
         except Exception as e:
-            logger.error(f"Could not load/unpickle BM25 index from {storage_key}: {e}", exc_info=True)
+            logger.error(f"QUERY_TIME: Could not load/unpickle BM25 index: {e}", exc_info=True)
         
-        logger.warning(f"BM25 index not found or failed to load for project {self.project.id}. Query will rely on vector search only.")
+        logger.warning(f"QUERY_TIME: BM25 index not found or failed to load. Query will rely on vector search only.")
         return None
 
     def _get_retriever(self) -> Runnable:

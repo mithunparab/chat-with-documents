@@ -248,7 +248,6 @@ def chat_history_sidebar():
     if sessions_res := api_request("GET", f"chat/sessions/{st.session_state.current_project_id}"):
         for session in sessions_res.json():
             is_selected = st.session_state.current_chat_id == session['id']
-            # FIX: Use valid button types: "primary" for selected, "secondary" for others.
             button_type = "primary" if is_selected else "secondary"
             if st.sidebar.button(session['title'], key=f"session_{session['id']}", use_container_width=True, type=button_type):
                 if not is_selected:
@@ -260,38 +259,31 @@ def get_chat_messages(project_id, chat_id):
         return res.json()['messages']
     return []
 
+
+
 def chat_pane():
     st.header(f"Project: {st.session_state.current_project_name}")
-    
-    # Load messages for the current chat
+
     if 'messages' not in st.session_state:
         st.session_state.messages = {}
-    
+
     if st.session_state.current_chat_id and st.session_state.current_chat_id not in st.session_state.messages:
         st.session_state.messages[st.session_state.current_chat_id] = get_chat_messages(
             st.session_state.current_project_id, st.session_state.current_chat_id
         )
 
-    # Display messages
-    current_messages = st.session_state.messages.get(st.session_state.current_chat_id, [])
-    for msg in current_messages:
+    for msg in st.session_state.messages.get(st.session_state.current_chat_id, []):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Stream handler for API response
-    def stream_handler(prompt: str) -> Generator[str, None, None]:
+    def stream_handler(prompt: str) -> Generator[Dict[str, Any], None, None]:
         payload = {"query": prompt, "chat_id": st.session_state.current_chat_id}
         url = f"{API_URL}/chat/stream/{st.session_state.current_project_id}"
-        event_type = ""
         
         try:
             with requests.post(url, json=payload, headers=get_auth_headers(), stream=True, timeout=300) as response:
                 response.raise_for_status()
-                
-                with st.expander("Sources", expanded=True):
-                    sources_placeholder = st.empty()
-                    sources_placeholder.info("Retrieving sources...")
-
+                event_type = None
                 for line in response.iter_lines():
                     if line:
                         decoded_line = line.decode('utf-8')
@@ -299,57 +291,62 @@ def chat_pane():
                             event_type = decoded_line[len("event:"):].strip()
                         elif decoded_line.startswith("data:"):
                             data_json = decoded_line[len("data:"):].strip()
-                            
-                            if not data_json:
-                                continue
-                            
-                            try:
-                                data = json.loads(data_json)
-                            except json.JSONDecodeError:
-                                st.warning(f"Could not decode stream data: {data_json}")
-                                continue
-
-                            if event_type == "start" and not st.session_state.current_chat_id:
-                                st.session_state.current_chat_id = data['chat_id']
-                                if st.session_state.current_chat_id not in st.session_state.messages:
-                                    st.session_state.messages[st.session_state.current_chat_id] = []
-                            
-                            elif event_type == "sources":
-                                sources_placeholder.empty() 
-                                for i, src in enumerate(data):
-                                    with sources_placeholder.container():
-                                        st.info(f"**Source {i+1}: {src.get('source', 'N/A')}**\n\n---\n\n{src.get('content', '')}")
-                            
-                            elif event_type == "token":
-                                yield data
-                            
-                            elif event_type == "error":
-                                st.error(f"An error occurred in the stream: {data}")
-
+                            if data_json and event_type:
+                                yield {
+                                    "event": event_type,
+                                    "data": json.loads(data_json)
+                                }
+                                event_type = None 
         except requests.RequestException as e:
             st.error(f"Failed to connect to streaming API: {e}")
-            yield "" # End the generator
+            yield {"event": "error", "data": "Connection to API failed."}
+        except json.JSONDecodeError:
+            st.warning("Could not decode stream data.")
+            yield {"event": "error", "data": "Invalid data received from stream."}
 
-    # Chat input and response streaming
     if prompt := st.chat_input("Ask a question about your documents..."):
-        # Ensure message list exists for the current chat
-        if st.session_state.current_chat_id not in st.session_state.messages:
-            st.session_state.messages[st.session_state.current_chat_id] = []
-        current_messages = st.session_state.messages[st.session_state.current_chat_id]
-
-        current_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        st.session_state.messages.setdefault(st.session_state.current_chat_id, []).append({"role": "user", "content": prompt})
+        
         with st.chat_message("assistant"):
-            current_project = next((p for p in st.session_state.projects if p['id'] == st.session_state.current_project_id), {})
-            spinner_msg = "The first query with a local model can take 2-3 minutes to load. Subsequent queries will be fast." if current_project.get('llm_provider') == 'ollama' else "Thinking..."
-            with st.spinner(spinner_msg):
-                full_response = st.write_stream(stream_handler(prompt))
+            with st.expander("Sources", expanded=True):
+                sources_placeholder = st.empty()
+                sources_placeholder.info("Retrieving sources...")
+            response_placeholder = st.empty()
+            full_response = ""
+            is_new_chat = not st.session_state.current_chat_id
 
-        current_messages.append({"role": "assistant", "content": full_response})
-        # A rerun is needed to refresh the chat history sidebar if a new chat was created
-        if len(current_messages) == 2:
+            for event in stream_handler(prompt):
+                event_type = event.get("event")
+                data = event.get("data")
+
+                if event_type == "start":
+                    new_chat_id = data.get('chat_id')
+                    if is_new_chat and new_chat_id:
+                        st.session_state.messages[new_chat_id] = st.session_state.messages.pop(None, [])
+                        st.session_state.current_chat_id = new_chat_id
+                
+                elif event_type == "sources":
+                    sources_placeholder.empty()
+                    with sources_placeholder.container():
+                        for i, src in enumerate(data):
+                            st.info(f"**Source {i+1}: {src.get('source', 'N/A')}**\n\n---\n\n{src.get('content', '')}")
+                
+                elif event_type == "token":
+                    full_response += data
+                    response_placeholder.markdown(full_response + "▌")
+                
+                elif event_type == "error":
+                    st.error(data)
+            
+            response_placeholder.markdown(full_response)
+        
+        if st.session_state.current_chat_id:
+            st.session_state.messages[st.session_state.current_chat_id].append({"role": "assistant", "content": full_response})
+
+        if is_new_chat:
             st.rerun()
 
 def document_manager_pane():
@@ -362,7 +359,7 @@ def document_manager_pane():
                 count = sum(1 for f in files if api_request("POST", f"documents/upload/{st.session_state.current_project_id}", files={'file': (f.name, f.getvalue(), f.type)}))
                 if count > 0: 
                     st.success(f"{count}/{len(files)} files uploaded. Processing started.")
-                    st.cache_data.clear() # Clear cache to show new doc immediately
+                    st.cache_data.clear() 
                     st.rerun()
 
     with c2:
@@ -371,7 +368,7 @@ def document_manager_pane():
             if url and st.button("Add URL", use_container_width=True):
                 if api_request("POST", f"documents/upload_url/{st.session_state.current_project_id}", json={"url": url}):
                     st.success(f"URL added. Processing started.")
-                    st.cache_data.clear() # Clear cache to show new doc immediately
+                    st.cache_data.clear() 
                     st.rerun()
 
     st.markdown("---")
@@ -379,7 +376,7 @@ def document_manager_pane():
     
     placeholder = st.empty()
     
-    @st.cache_data(ttl=5) # Cache the API call to avoid flickering
+    @st.cache_data(ttl=5) 
     def get_documents(project_id):
         if res := api_request("GET", f"documents/{project_id}"):
             return res.json()

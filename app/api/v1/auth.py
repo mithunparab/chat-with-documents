@@ -5,17 +5,15 @@ from sqlalchemy.orm import Session
 from datetime import timedelta
 from httpx_oauth.oauth2 import GetAccessTokenError
 
-# Import your own JWT creator normally
 from app.auth import jwt
 from app.db import crud
 from app.db.database import get_db
-from app.auth.schemas import UserCreate, User, Token
+from app.db.schemas import UserCreate, User, Token
 from app.core.dependencies import get_current_user
 from app.core.config import settings
 from app.db import models
 import logging
 
-# Import the external library's JWT with an alias to avoid conflict
 from jose import jwt as jose_jwt, JWTError
 from httpx_oauth.clients.google import GoogleOAuth2
 
@@ -23,13 +21,11 @@ from httpx_oauth.clients.google import GoogleOAuth2
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# --- Google OAuth2 Client Setup ---
 google_client = GoogleOAuth2(
     client_id=settings.GOOGLE_CLIENT_ID,
     client_secret=settings.GOOGLE_CLIENT_SECRET,
 )
 
-# === Local Authentication ===
 @router.post("/signup", response_model=User, status_code=status.HTTP_201_CREATED)
 def signup(user: UserCreate, db: Session = Depends(get_db)) -> models.User:
     db_user = crud.get_user_by_username(db, username=user.username)
@@ -90,8 +86,6 @@ async def callback_google(request: Request, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail="ID token not found in Google response")
 
         try:
-            # **THE CRITICAL FIX IS HERE**
-            # Restore the options from the original working code to prevent the at_hash claim error.
             id_token_payload = jose_jwt.decode(
                 id_token_jwt, 
                 key=None, 
@@ -99,7 +93,7 @@ async def callback_google(request: Request, db: Session = Depends(get_db)):
                     "verify_signature": False, 
                     "verify_aud": False,
                     "verify_iss": False,
-                    "verify_at_hash": False # <-- THIS LINE FIXES THE CRASH
+                    "verify_at_hash": False 
                 }
             )
         except JWTError as e:
@@ -146,7 +140,6 @@ async def callback_google(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse(url=error_url)
 
 
-# === User Management ===
 @router.get("/users/me", response_model=User)
 def read_users_me(current_user: models.User = Depends(get_current_user)):
     return current_user

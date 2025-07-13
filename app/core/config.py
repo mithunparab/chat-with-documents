@@ -1,5 +1,3 @@
-# app/core/config.py
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import validator
 from typing import Optional
@@ -21,6 +19,13 @@ class Settings(BaseSettings):
     PUBLIC_API_URL: str = "http://localhost:8000" # Add this line
     FRONTEND_URL: str = "http://localhost:8501"
     GOOGLE_OAUTH_REDIRECT_URI: Optional[str] = None
+
+    @validator("GOOGLE_OAUTH_REDIRECT_URI", pre=True, always=True)
+    def assemble_google_redirect_uri(cls, v: Optional[str], values: dict) -> str:
+        if isinstance(v, str):
+            return v
+        public_api_url = values.get("PUBLIC_API_URL")
+        return f"{public_api_url}/auth/callback/google"
 
     # --- RAG/LLM Settings ---
     CHUNK_SIZE: int = 1000
